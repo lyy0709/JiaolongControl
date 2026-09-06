@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   NvidiaGpu,
   type CommandResult,
@@ -100,6 +100,21 @@ async function apply() {
   preview.value = null
   acknowledged.value = false
 }
+async function preset() {
+  preview.value = null
+  acknowledged.value = false
+  await run(async () => {
+    const res = await NvidiaGpu.Preview4060LaptopPreset()
+    if (res.Success && res.Data) {
+      curve.value = res.Data.Plan.Original
+      anchor.value = res.Data.Plan.AnchorId
+      target.value = res.Data.Plan.TargetMhz
+      await nextTick() // Input watchers must invalidate the previous preview first.
+      preview.value = res.Data
+    }
+    return res
+  })
+}
 let timer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   void status()
@@ -114,13 +129,22 @@ onUnmounted(() => clearInterval(timer)) // The rollback timer lives in the backe
   <section class="curve-panel bg-panel/60 border border-ink/10 rounded-xl p-5 shadow-lg space-y-4">
     <div class="flex justify-between items-center flex-wrap gap-2">
       <h2 class="font-semibold">GPU 电压 / 频率曲线</h2>
-      <span class="text-xs text-amber-600">实验性 · 已验证单点读写/恢复，未验证降压稳定性</span>
+      <span class="text-xs text-amber-600">实验性 · 本机整段曲线/手动及超时恢复已验证，长期稳定性未验证</span>
     </div>
     <p class="text-xs leading-6 text-gray-500">
       参考小飞机的曲线平台操作：保留低电压侧，锚点及右侧设为目标频率。
       这不是硬电压上限，也不等于稳定降压。请先重置锁频、关闭 MSI Afterburner 等调参程序，保存工作。
     </p>
     <a-button :disabled="busy || trial?.Active" @click="read">读取曲线（只读）</a-button>
+    <div class="rounded-lg border border-ink/10 p-3 space-y-2">
+      <h3 class="text-sm font-medium">4060 Laptop 保守试用预设</h3>
+      <p class="text-xs leading-6 text-gray-500">
+        以本机 900 mV 点的原有频率生成右侧平台，不提高任何点的频率，不改显存或电压提升。
+        本机测试参考为 900 mV / 2250 MHz；不同机器及温度下以实际读取为准。
+        这是推荐的初始试用方式，不是通用稳定承诺。已有偏移或型号不符时禁止套用。
+      </p>
+      <a-button :disabled="busy || trial?.Active || !curve" @click="preset">生成 4060 保守预设（仅预览）</a-button>
+    </div>
     <div v-if="plotted" class="rounded-lg bg-ink/[0.03] p-2">
       <svg
         viewBox="0 0 580 260"

@@ -5,6 +5,9 @@ using JiaoLongControl.Server.Core.Utils;
 // Explicit real-GPU read/preview integration check; not part of automated unit
 // tests. Do not initialize WPF, Bridge.Instance, PawnIO or any setter.
 using var gpu = new NvidiaGpuController();
+var memoryRead = gpu.GetGpuMemoryClockRange();
+if (!memoryRead.Success || memoryRead.Data is not GpuMemoryClockOptions memoryClocks)
+    throw new InvalidOperationException(memoryRead.Message);
 var read = gpu.GetVoltageFrequencyCurve();
 if (!read.Success || read.Data is not CurveSnapshot snapshot) throw new InvalidOperationException(read.Message);
 var anchor = snapshot.Points.Single(p => p.VoltageMicroV == 900000);
@@ -17,5 +20,6 @@ Console.WriteLine(JsonSerializer.Serialize(new
 {
     ReadSuccess = true, PreviewSuccess = true, CorePoints = snapshot.Points.Length,
     OffsetSlots = snapshot.Offsets.Length, AnchorMv = 900, PreviewMhz = anchor.FrequencyKHz / 1000,
-    OffsetsUnchanged = true, HardwareWrites = false
+    OffsetsUnchanged = true, HardwareWrites = false,
+    MemoryClockOptions = memoryClocks.Values, MemoryLockWriteTested = false
 }, new JsonSerializerOptions { WriteIndented = true }));

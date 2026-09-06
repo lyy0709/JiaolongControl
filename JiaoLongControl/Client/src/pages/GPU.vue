@@ -90,11 +90,12 @@ const fanChart = computed(() => generateSvgPath(fanSpeedHistory.value, 40)) // C
 const GPUData = ref(configStore.config ? { ...configStore.config.Gpu } : undefined)
 const coreRangeReady = ref(false)
 const memRangeReady = ref(false)
+const memoryClockValues = ref<number[]>([])
+const memoryClockStatus = ref('尚未读取显存档位')
 const gpuClockOffset = ref(0)
 const memClockOffset = ref(0)
 const tempWall = ref(87)
 const coreClockRange = ref({ Min: 0, Max: 500 })
-const memClockRange = ref({ Min: 0, Max: 1500 })
 const powerLimitRange = ref({ Min: 50, Max: 140 })
 const offsetRange = ref({ Core: { Min: -1000, Max: 1000 }, Memory: { Min: -1000, Max: 3000 } })
 const thermalPolicy = ref({ CurrentTemp: 87, MinTemp: 65, DefaultTemp: 83, MaxTemp: 90 })
@@ -109,10 +110,10 @@ const ocCaps = ref<OverclockCapabilities>({
 async function fetchGpuRanges() {
   try {
     const [core, mem, power, ocRange, ocOffsets, thermal, caps] = await Promise.all([
-      NvidiaGpu.GetGpuCoreClockRange(),
-      NvidiaGpu.GetGpuMemoryClockRange(),
-      NvidiaGpu.GetGpuPowerLimitRange(),
-      NvidiaGpu.GetClockOffsetRange(),
+      NvidiaGpu.GetGpuCoreClockRange().catch(() => null),
+      NvidiaGpu.GetGpuMemoryClockRange().catch(() => null),
+      NvidiaGpu.GetGpuPowerLimitRange().catch(() => null),
+      NvidiaGpu.GetClockOffsetRange().catch(() => null),
       NvidiaGpu.GetClockOffsets().catch(() => null),
       NvidiaGpu.GetGpuThermalPolicy().catch(() => null),
       NvidiaGpu.GetOverclockCapabilities().catch(() => null),
@@ -122,7 +123,7 @@ async function fetchGpuRanges() {
       ocCaps.value = caps.Data
     }
 
-    if (core.Success && core.Data) {
+    if (core?.Success && core.Data) {
       coreRangeReady.value = true
       const min = core.Data.Min ?? 0
       const max = core.Data.Max ?? 500
@@ -132,17 +133,26 @@ async function fetchGpuRanges() {
       }
     }
 
-    if (mem.Success && mem.Data) {
+    const values = mem?.Success ? mem.Data?.Values : undefined
+    if (Array.isArray(values) && values.length > 0 &&
+        values.every((v) => Number.isInteger(v) && v >= 100 && v <= 12000)) {
+      memoryClockValues.value = [...new Set(values)].sort((a, b) => a - b)
       memRangeReady.value = true
-      const min = mem.Data.Min ?? 0
-      const max = mem.Data.Max ?? 1500
-      memClockRange.value = { Min: min, Max: max }
-      if (GPUData.value && (GPUData.value.MemoryClock < min || GPUData.value.MemoryClock > max)) {
-        GPUData.value.MemoryClock = max
+      memoryClockStatus.value = memoryClockValues.value.length === 1
+        ? '驱动只报告一个显存档位，无法选择其他频率。'
+        : '仅列出驱动报告的离散档位；不是显存超频偏移。405 / 810 MHz 等低档位会大幅降低性能。'
+      if (GPUData.value && !memoryClockValues.value.includes(GPUData.value.MemoryClock)) {
+        // Only prepare an input. Reading never saves a config or applies a clock.
+        GPUData.value.MemoryClock = memoryClockValues.value[memoryClockValues.value.length - 1]!
       }
+    } else {
+      memRangeReady.value = false
+      memoryClockValues.value = []
+      memoryClockStatus.value = mem?.Message && !mem.Success
+        ? mem.Message : '未读取到有效的显存档位；请确认前后端版本一致。已禁止猜测范围。'
     }
 
-    if (power.Success && power.Data) {
+    if (power?.Success && power.Data) {
       const min = power.Data.Min ?? 50
       const max = power.Data.Max ?? 140
       powerLimitRange.value = { Min: min, Max: max }
@@ -151,7 +161,7 @@ async function fetchGpuRanges() {
       }
     }
 
-    if (ocRange.Success && ocRange.Data) {
+    if (ocRange?.Success && ocRange.Data) {
       offsetRange.value = {
         Core: { Min: ocRange.Data.Core?.Min ?? -1000, Max: ocRange.Data.Core?.Max ?? 1000 },
         Memory: { Min: ocRange.Data.Memory?.Min ?? -1000, Max: ocRange.Data.Memory?.Max ?? 3000 },
@@ -180,6 +190,10 @@ await fetchGpuRanges()
 
 async function handleApplyNormal() {
   if (!GPUData.value || !coreRangeReady.value || !memRangeReady.value) return
+  if (!memoryClockValues.value.includes(GPUData.value.MemoryClock)) {
+    Message.error('请选择驱动报告的显存档位')
+    return
+  }
   const draft = { ...GPUData.value }
   loading.value = true
   try {
@@ -199,7 +213,7 @@ async function handleApplyNormal() {
     if (configStore.config) configStore.config.Gpu = draft
     const saveRes = await configStore.saveConfig()
     if (saveRes?.Success) {
-      Message.success('常规设置已应用并保存')
+      Message.success('驱动已接受锁频请求并保存；实际频率请查看实时监控')
     } else {
       Message.error(saveRes?.Message || '设置保存失败')
     }
@@ -337,19 +351,22 @@ async function handleResetNormal() {
             <div class="space-y-2">
               <div class="flex justify-between items-center text-xs">
                 <span class="text-gray-300 flex items-center gap-1"
-                  >显存频率 <span class="text-gray-500 cursor-pointer text-[10px]">ⓘ</span></span
+                  >显存锁频档位 <span class="text-gray-500 cursor-pointer text-[10px]">ⓘ</span></span
                 >
                 <span class="text-purple-400 font-medium font-mono"
                   >{{ GPUData.MemoryClock }} MHz</span
                 >
               </div>
-              <a-slider
+              <a-select
                 v-model="GPUData.MemoryClock"
+                aria-label="显存锁频档位"
                 :disabled="loading || !memRangeReady"
-                :min="memClockRange.Min"
-                :max="memClockRange.Max"
                 class="w-full"
-              />
+              >
+                <a-option v-for="mhz in memoryClockValues" :key="mhz" :value="mhz">{{ mhz }} MHz</a-option>
+              </a-select>
+              <p class="text-xs text-gray-500 break-words" role="status">{{ memoryClockStatus }}</p>
+              <p class="text-xs text-gray-500">读取档位不代表驱动允许锁频；应用仍可能被驱动拒绝。这里不提供高于标称频率的显存超频。</p>
             </div>
 
             <!-- 功耗限制：笔记本 TGP 由固件/EC 管理，驱动接口不可用，暂不提供 -->

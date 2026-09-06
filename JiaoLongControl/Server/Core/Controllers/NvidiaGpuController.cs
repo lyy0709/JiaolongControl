@@ -15,8 +15,14 @@ namespace JiaoLongControl.Server.Core.Controllers
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public partial class NvidiaGpuController : IDisposable
     {
-        public NvidiaGpuController()
+        private readonly Func<bool> _clockLocksEnabled;
+
+        public NvidiaGpuController() : this(() => Bridge.Instance.Config.Gpu.ClockLockEnabled) { }
+
+        // Keep hardware integration tests independent of WPF/CPU/fan/driver initialization.
+        internal NvidiaGpuController(Func<bool> clockLocksEnabled)
         {
+            _clockLocksEnabled = clockLocksEnabled ?? throw new ArgumentNullException(nameof(clockLocksEnabled));
             NVIDIA.Initialize();
         }
 
@@ -216,19 +222,15 @@ namespace JiaoLongControl.Server.Core.Controllers
         {
             try
             {
-                var gpu = GetGPU(gpuIndex);
-                int baseMem = (int)(gpu.BaseClockFrequencies.MemoryClock.Frequency / 1000);
-                int boostMem = (int)(gpu.BoostClockFrequencies.MemoryClock.Frequency / 1000);
-
-                if (boostMem == 0) boostMem = (int)(gpu.CurrentClockFrequencies.MemoryClock.Frequency / 1000);
-                if (baseMem == 0 || boostMem == 0) throw new Exception("Invalid memory clock");
-
-                int minMhz = Math.Min(baseMem, boostMem);
-                int maxMhz = Math.Max(baseMem, boostMem);
-
-                return new CommandResult(true, "获取成功", new { Min = minMhz, Max = maxMhz });
+                // Base/Boost are specifications, often both 8001 MHz on a 4060 Laptop.
+                // Use the same device selector/API as LockMemoryClock, without a write probe.
+                var result = RunNvidiaSmiCore("-i", ResolveGpuIndex(gpuIndex).ToString(),
+                    "--query-supported-clocks=mem", "--format=csv,noheader,nounits");
+                if (!result.Success) return result;
+                var clocks = GpuMemoryClockOptions.Parse(result.Data as string ?? "");
+                return new CommandResult(true, "已读取驱动显存档位；锁频写入支持尚未验证", clocks);
             }
-            catch { return new CommandResult(false, "无法读取显存时钟范围，已禁止猜测范围"); }
+            catch (Exception ex) { return new CommandResult(false, $"无法读取显存档位：{ex.Message}"); }
         }
 
         public CommandResult GetGpuPowerLimitRange(int gpuIndex = -1)
@@ -264,8 +266,16 @@ namespace JiaoLongControl.Server.Core.Controllers
         public CommandResult LockMemoryClock(int freq, int gpuIndex = -1)
         {
             if (freq < 100 || freq > 12000) return new CommandResult(false, "无效的显存频率");
-            var result = RunNvidiaSmi("-i", ResolveGpuIndex(gpuIndex).ToString(), "-lmc", $"{freq},{freq}");
-            return result.Success ? new CommandResult(true, $"显存频率已锁定 {freq} MHz") : result;
+            lock (_curveGate)
+            {
+                if (CurveChangesActive) return new CommandResult(false, "请先恢复曲线备份，再操作显存锁频");
+                var supported = GetGpuMemoryClockRange(gpuIndex);
+                if (!supported.Success) return supported;
+                if (supported.Data is not GpuMemoryClockOptions clocks || !clocks.Contains(freq))
+                    return new CommandResult(false, "显存频率不在驱动报告的档位中，请重新读取；不会写入");
+                var result = RunNvidiaSmiCore("-i", ResolveGpuIndex(gpuIndex).ToString(), "-lmc", $"{freq},{freq}");
+                return result.Success ? new CommandResult(true, $"驱动已接受显存锁频请求 {freq} MHz；实际频率请查看实时监控") : result;
+            }
         }
 
         public CommandResult ResetMemoryClock(int gpuIndex = -1)
@@ -570,18 +580,17 @@ namespace JiaoLongControl.Server.Core.Controllers
                 string output = outputTask.GetAwaiter().GetResult();
                 string error = errorTask.GetAwaiter().GetResult();
 
-                if (process.ExitCode != 0)
+                if (NvidiaSmiOutput.IsFailure(process.ExitCode, output, error))
                 {
                     string message = string.IsNullOrWhiteSpace(error) ? output : error;
                     return new CommandResult(false, $"[NvidiaGpuController] nvidia-smi {string.Join(" ", arguments)} 失败: {message.Trim()}");
                 }
+                return new CommandResult(true, "执行成功", output);
             }
             catch (Exception ex)
             {
                 return new CommandResult(false, $"[NvidiaGpuController] 执行 nvidia-smi 异常: {ex.Message}");
             }
-
-            return new CommandResult(true, "执行成功");
         }
 
         public void Dispose()

@@ -11,10 +11,10 @@
         <Configurations>Debug;Release</Configurations>
         <Platforms>x64</Platforms>
         <SatelliteResourceLanguages>zh-CN</SatelliteResourceLanguages>
-        <AppVersion>10.13.25-safe.2</AppVersion>
-        <Version>10.13.25-safe.2</Version>
-        <AssemblyVersion>10.13.25.2</AssemblyVersion>
-        <FileVersion>10.13.25.2</FileVersion>
+        <AppVersion>10.13.25-safe.3</AppVersion>
+        <Version>10.13.25-safe.3</Version>
+        <AssemblyVersion>10.13.25.3</AssemblyVersion>
+        <FileVersion>10.13.25.3</FileVersion>
     </PropertyGroup>
 
     <ItemGroup>
@@ -93,6 +93,7 @@
     </ItemGroup>
 
     <ItemGroup>
+        <InternalsVisibleTo Include="GpuCurveHardwareSmoke" />
         <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
             <_Parameter1>AppVersion</_Parameter1>
             <_Parameter2>$(AppVersion)</_Parameter2>

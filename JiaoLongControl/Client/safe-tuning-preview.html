@@ -8,7 +8,11 @@
   <body>
     <div id="app"></div>
     <script type="module">
-      import { createApp, h } from 'vue'
+      import { createApp, h, Suspense } from 'vue'
+      import { createPinia } from 'pinia'
+      import GPU from './src/pages/GPU.vue'
+      import { useConfigStore } from './src/stores/config'
+      import { useSystemInfoStore } from './src/stores/systemInfo'
       import GpuCurveEditor from './src/components/GpuCurveEditor.vue'
       import PawnIODriverMode from './src/pages/Settings/components/PawnIODriverMode.vue'
       import './src/style.css'
@@ -18,6 +22,8 @@
       if (window.chrome?.webview)
         throw new Error('Mock preview must never run inside the hardware host')
       window.chrome ??= {}
+      const query = new URLSearchParams(location.search)
+      window.mockWrites = []
       const points = Array.from({ length: 32 }, (_, Id) => ({
         Id,
         VoltageMicroV: 600000 + Id * 12500,
@@ -27,7 +33,7 @@
       const snapshot = {
         Device: 'MOCK GPU — no hardware connection',
         Points: points,
-        Offsets: Array(128).fill(0),
+        Offsets: Array(255).fill(0),
         MinOffsetKHz: -1000000,
         MaxOffsetKHz: 1000000,
       }
@@ -40,7 +46,25 @@
         hostObjects: {
           bridge: {
             NvidiaGpu: {
+              GetGpuCoreClockRange: () => result({ Min: 1545, Max: 2250 }),
+              GetGpuMemoryClockRange: () => query.get('memory') === 'unsupported'
+                ? result(null, '模拟：此驱动未返回显存档位', false)
+                : result({ Min: 405, Max: 8001, Values: [405, 810, 6001, 7001, 8001] }),
+              GetGpuPowerLimitRange: () => result(null, '模拟：不支持', false),
+              GetClockOffsetRange: () => result(null, '模拟：不支持', false),
+              GetClockOffsets: () => result(null, '模拟：不支持', false),
+              GetGpuThermalPolicy: () => result(null, '模拟：不支持', false),
+              GetOverclockCapabilities: () => result(null, '模拟：不支持', false),
+              LockGpuClock: (mhz) => { window.mockWrites.push(['core', mhz]); return result(null) },
+              LockMemoryClock: (mhz) => { window.mockWrites.push(['memory', mhz]); return result(null) },
+              ResetGpuClock: () => result(null),
+              ResetMemoryClock: () => result(null),
               GetVoltageFrequencyCurve: () => result(snapshot),
+              Preview4060LaptopPreset: () => {
+                const AnchorId = 24, TargetMhz = 2280, Offsets = [...snapshot.Offsets]
+                for (const p of points) if (p.Id >= AnchorId) Offsets[p.Id] = TargetMhz * 1000 - p.FrequencyKHz
+                return result({ Token: 'MOCK-PRESET', Plan: { Original: snapshot, AnchorId, TargetMhz, Offsets } })
+              },
               PreviewVoltageFrequencyCurve: (AnchorId, TargetMhz) => {
                 const Offsets = [...snapshot.Offsets]
                 for (const p of points)
@@ -81,9 +105,16 @@
               InstallPawnIO: () => result(null, '模拟页面禁止运行安装器', false),
               OpenUrl: () => result(null, '模拟页面不打开外部链接', false),
             },
+            ConfigCtrl: { SetConfig: () => { window.mockWrites.push(['save']); return result(null) } },
           },
         },
       }
+      const pinia = createPinia()
+      const config = useConfigStore(pinia)
+      config.config = { Gpu: { ClockLockEnabled: false, GpuClock: 2250, MemoryClock: 8001,
+        CoreClockOffset: 0, MemoryClockOffset: 0, PowerLimit: 0, VoltageBoostPercent: 0 } }
+      useSystemInfoStore(pinia).gpuStats = { GpuName: 'NVIDIA GeForce RTX 4060 Laptop GPU (MOCK)',
+        DriverVersion: 'MOCK', DriverDate: 'MOCK', MemoryTotal: '8192 MiB', BusWidth: 'x8' }
       createApp({
         render: () =>
           h('main', { class: 'max-w-4xl mx-auto p-4 space-y-6 text-ink' }, [
@@ -92,10 +123,10 @@
               { class: 'text-red-600' },
               '开发预览 · 全部为模拟数据 · 不连接硬件 · 不是推荐参数',
             ),
-            h(GpuCurveEditor),
-            h(PawnIODriverMode),
+            ...(query.has('gpu') ? [h(Suspense, null, { default: () => h(GPU) })]
+              : [h(GpuCurveEditor), h(PawnIODriverMode)]),
           ]),
-      }).mount('#app')
+      }).use(pinia).mount('#app')
     </script>
   </body>
 </html>

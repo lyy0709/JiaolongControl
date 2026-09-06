@@ -6,6 +6,7 @@ import GpuCurveEditor from '../GpuCurveEditor.vue'
 const api = vi.hoisted(() => ({
   GetVoltageFrequencyCurve: vi.fn(),
   PreviewVoltageFrequencyCurve: vi.fn(),
+  Preview4060LaptopPreset: vi.fn(),
   ApplyVoltageFrequencyCurve: vi.fn(),
   GetCurveTrialStatus: vi.fn(),
   KeepVoltageFrequencyCurve: vi.fn(),
@@ -72,6 +73,9 @@ beforeEach(() => {
     },
   })
   api.ApplyVoltageFrequencyCurve.mockResolvedValue({ Success: true, Message: '试用中' })
+  api.Preview4060LaptopPreset.mockResolvedValue({ Success: true, Message: '仅预览，不保证稳定', Data: {
+    Token: 'preset-token', Plan: { Original: snapshot, Offsets: snapshot.Offsets, AnchorId: 24, TargetMhz: 2280 },
+  } })
   wrapper = mount(GpuCurveEditor, {
     global: {
       stubs: {
@@ -97,6 +101,27 @@ async function preview() {
   await flushPromises()
 }
 describe('safe curve editor', () => {
+  it('built-in preset only previews, synchronizes inputs, and still requires consent', async () => {
+    await byText('读取曲线').trigger('click'); await flushPromises()
+    await byText('生成 4060 保守预设').trigger('click'); await flushPromises()
+    expect(api.Preview4060LaptopPreset).toHaveBeenCalledOnce()
+    expect(wrapper.get('select').element.value).toBe('24')
+    expect((wrapper.get('input[type=number]').element as HTMLInputElement).value).toBe('2280')
+    expect(wrapper.findAll('polyline')).toHaveLength(2)
+    expect(byText('试用 60 秒').attributes('disabled')).toBeDefined()
+    expect(api.ApplyVoltageFrequencyCurve).not.toHaveBeenCalled()
+    await wrapper.get('input[type=checkbox]').setValue(true)
+    await byText('试用 60 秒').trigger('click'); await flushPromises()
+    expect(api.ApplyVoltageFrequencyCurve).toHaveBeenCalledWith('preset-token', true)
+  })
+  it('preset rejection cannot expose an apply button or invent parameters', async () => {
+    api.Preview4060LaptopPreset.mockResolvedValue({ Success: false, Message: '型号不符或已有偏移' })
+    await byText('读取曲线').trigger('click'); await flushPromises()
+    await byText('生成 4060 保守预设').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('型号不符或已有偏移')
+    expect(wrapper.text()).not.toContain('试用 60 秒')
+    expect(api.ApplyVoltageFrequencyCurve).not.toHaveBeenCalled()
+  })
   it('mount/status/read/preview never apply offsets', async () => {
     await flushPromises()
     expect(api.GetVoltageFrequencyCurve).not.toHaveBeenCalled()

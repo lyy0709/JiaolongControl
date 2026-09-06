@@ -165,6 +165,53 @@ Test("memory-domain duplicate voltage ends core prefix and later slots cannot re
 Test("old 128-entry snapshots cannot be mistaken for corrected recovery records", () => {
     Reject(() => GpuCurvePlanner.Validate(Snapshot() with { Offsets = new int[128] }));
 });
+Test("memory clock query returns sorted discrete choices, not base/boost bounds", () => {
+    var choices = GpuMemoryClockOptions.Parse("8001\r\n8001\r\n7001\n6001\n810\n405\n");
+    Check(choices.Values.SequenceEqual(new[] { 405, 810, 6001, 7001, 8001 }));
+    Check(choices.Min == 405 && choices.Max == 8001);
+    Check(choices.Contains(7001) && !choices.Contains(7500) && !choices.Contains(9001));
+});
+Test("memory clock query fails closed on empty, malformed or unsupported output", () => {
+    foreach (var output in new[] { "", " \r\n", "N/A", "8001\nNot Supported", "8001 MHz", "8001,2250", "8001.0", "-1", "0", "12001", "2147483648" })
+        Reject(() => GpuMemoryClockOptions.Parse(output));
+});
+Test("one memory clock remains one choice and cannot invent an adjustable range", () => {
+    var choices = GpuMemoryClockOptions.Parse("8001\n8001\n");
+    Check(choices.Values.SequenceEqual(new[] { 8001 }));
+    Check(choices.Min == 8001 && choices.Max == 8001 && !choices.Contains(8000));
+});
+Test("nvidia-smi textual refusal is not success even with exit code zero", () => {
+    Check(NvidiaSmiOutput.IsFailure(0, "Setting locked memory clocks is not supported for this GPU.", ""));
+    Check(NvidiaSmiOutput.IsFailure(0, "Insufficient Permissions", ""));
+    Check(NvidiaSmiOutput.IsFailure(0, "", "Unexpected driver diagnostic"));
+    Check(NvidiaSmiOutput.IsFailure(3, "", ""));
+    Check(!NvidiaSmiOutput.IsFailure(0, "8001\n7001\n", ""));
+    Check(!NvidiaSmiOutput.IsFailure(0, "Memory clocks set to 7001 MHz.", ""));
+});
+CurveSnapshot StockSnapshot() => Snapshot() with {
+    Offsets = new int[255], Points = Snapshot().Points.Select(p => p with { OffsetKHz = 0 }).ToArray()
+};
+Test("4060 preset uses the device's 900 mV stock frequency, never uplifts or changes memory", () => {
+    var stock = StockSnapshot(); var hash = stock.Fingerprint();
+    var plan = GpuCurvePresets.Create4060LaptopConservative(stock, "NVIDIA GeForce RTX 4060 Laptop GPU");
+    Check(plan.AnchorId == 24 && plan.TargetMhz == 2280);
+    Check(plan.Offsets.All(x => x <= 0));
+    Check(plan.Offsets.Skip(32).All(x => x == 0));
+    Check(stock.Fingerprint() == hash);
+});
+Test("preset rejects desktop/different GPUs and nonzero pre-existing offsets", () => {
+    foreach (var name in new[] { "NVIDIA GeForce RTX 4060", "NVIDIA GeForce RTX 4070 Laptop GPU", "unknown" })
+        Reject(() => GpuCurvePresets.Create4060LaptopConservative(StockSnapshot(), name));
+    Reject(() => GpuCurvePresets.Create4060LaptopConservative(Snapshot(), "NVIDIA GeForce RTX 4060 Laptop GPU"));
+});
+Test("preset rejects missing anchor or any shape requiring uplift", () => {
+    var stock = StockSnapshot();
+    Reject(() => GpuCurvePresets.Create4060LaptopConservative(stock with {
+        Points = stock.Points.Select(p => p with { VoltageMicroV = p.VoltageMicroV + 1000 }).ToArray()
+    }, "NVIDIA GeForce RTX 4060 Laptop GPU"));
+    var points = (CurvePoint[])stock.Points.Clone(); points[30] = points[30] with { FrequencyKHz = 2100000 };
+    Reject(() => GpuCurvePresets.Create4060LaptopConservative(stock with { Points = points }, "NVIDIA GeForce RTX 4060 Laptop GPU"));
+});
 Console.WriteLine($"{passed} tests passed; no hardware writes or installer execution.");
 
 sealed class FakeDriver : ICurveOffsetDriver

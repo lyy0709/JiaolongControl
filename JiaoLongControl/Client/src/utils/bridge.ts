@@ -84,6 +84,10 @@ export interface RangeInfo {
   Max: number
 }
 
+export interface MemoryClockOptions extends RangeInfo {
+  Values: number[]
+}
+
 export interface ClockOffsetRangeInfo {
   Core: RangeInfo
   Memory: RangeInfo
@@ -220,7 +224,7 @@ export interface BridgeApi {
     GetGpuTemperature(gpuIndex?: number): HostBridgePromise<number>
     GetGpuFanSpeed(gpuIndex?: number): HostBridgePromise<number>
     GetGpuCoreClockRange(gpuIndex?: number): HostBridgePromise<RangeInfo>
-    GetGpuMemoryClockRange(gpuIndex?: number): HostBridgePromise<RangeInfo>
+    GetGpuMemoryClockRange(gpuIndex?: number): HostBridgePromise<MemoryClockOptions>
     GetGpuPowerLimitRange(gpuIndex?: number): HostBridgePromise<RangeInfo>
     LockGpuClock(freq: number, gpuIndex?: number): HostBridgePromise<void>
     LockGpuClock(minFreq: number, maxFreq: number, gpuIndex?: number): HostBridgePromise<void>
@@ -234,6 +238,7 @@ export interface BridgeApi {
     ApplyClockOffsets(coreMhz: number, memoryMhz: number, gpuIndex?: number): HostBridgePromise<void>
     GetVoltageFrequencyCurve(): HostBridgePromise<CurveSnapshot>
     PreviewVoltageFrequencyCurve(anchorId: number, targetMhz: number): HostBridgePromise<CurvePreview>
+    Preview4060LaptopPreset(): HostBridgePromise<CurvePreview>
     ApplyVoltageFrequencyCurve(token: string, acknowledge: boolean): HostBridgePromise<void>
     GetCurveTrialStatus(): HostBridgePromise<CurveTrialStatus>
     KeepVoltageFrequencyCurve(acknowledge: boolean): HostBridgePromise<void>
@@ -436,6 +441,7 @@ export const KeyboardGradient = {
 }
 
 export const NvidiaGpu = {
+  Preview4060LaptopPreset: () => call(raw.NvidiaGpu.Preview4060LaptopPreset()),
   GetVoltageFrequencyCurve: () => call(raw.NvidiaGpu.GetVoltageFrequencyCurve()),
   PreviewVoltageFrequencyCurve: (anchorId: number, targetMhz: number) => call(raw.NvidiaGpu.PreviewVoltageFrequencyCurve(anchorId, targetMhz)),
   ApplyVoltageFrequencyCurve: (token: string, acknowledge: boolean) => call(raw.NvidiaGpu.ApplyVoltageFrequencyCurve(token, acknowledge)),

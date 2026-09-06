@@ -87,6 +87,23 @@ public partial class NvidiaGpuController
         }
     }
 
+    public CommandResult Preview4060LaptopPreset()
+    {
+        lock (_curveGate)
+        {
+            _curvePreview = null;
+            try
+            {
+                if (CurveChangesActive) throw new InvalidOperationException("请先恢复上一份曲线备份");
+                _curvePreview = GpuCurvePresets.Create4060LaptopConservative(ReadCurve(), GetGPU(0).FullName);
+                return new CommandResult(true, "4060 Laptop 保守试用：900 mV 原有频率平台，不提升任何曲线点；尚未写入，不保证稳定", new {
+                    Token = _curvePreview.Original.Fingerprint(), Plan = _curvePreview
+                });
+            }
+            catch (Exception ex) { return new CommandResult(false, ex.Message); }
+        }
+    }
+
     public CommandResult ApplyVoltageFrequencyCurve(string token, bool acknowledgeRisk)
     {
         lock (_curveGate)
@@ -96,7 +113,7 @@ public partial class NvidiaGpuController
                 if (_curveDisposed || !acknowledgeRisk || CurveChangesActive || _curvePreview == null ||
                     token != _curvePreview.Original.Fingerprint())
                     throw new InvalidOperationException("需要新的预览和风险确认；已有备份时须先恢复");
-                if (Bridge.Instance.Config.Gpu.ClockLockEnabled)
+                if (_clockLocksEnabled())
                     throw new InvalidOperationException("请先在 GPU 锁频区重置锁频，并关闭其他调参程序");
                 var plan = _curvePreview;
                 var current = ReadCurve();
