@@ -42,6 +42,7 @@ namespace JiaoLongControl.Server.Core.Controllers
 
         public CommandResult SetCpuShortPower(byte sp)
         {
+            if (sp is < 5 or > 150) return new CommandResult(false, "短期功耗范围为 5–150 W");
             var res = MethodServices.SetValue(MethodName.CPUPower, new byte[2]
             {
                 (byte)CPUPower.ShortPower,
@@ -52,6 +53,7 @@ namespace JiaoLongControl.Server.Core.Controllers
 
         public CommandResult SetCpuLongPower(byte lp)
         {
+            if (lp is < 5 or > 120) return new CommandResult(false, "长期功耗范围为 5–120 W");
             var res = MethodServices.SetValue(MethodName.CPUPower, new byte[2]
             {
                 (byte)CPUPower.LongPower,
@@ -75,6 +77,7 @@ namespace JiaoLongControl.Server.Core.Controllers
         }
         public CommandResult SetCPUTempWall(byte tw)
         {
+            if (tw is < 60 or > 100) return new CommandResult(false, "温度墙范围为 60–100°C");
             var res = MethodServices.SetValue(MethodName.CPUPower, new byte[2]
             {
                 (byte)CPUPower.CpuTempWallState,

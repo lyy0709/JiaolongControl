@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Safe tuning — mock UI only</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { createApp, h } from 'vue'
+      import GpuCurveEditor from './src/components/GpuCurveEditor.vue'
+      import PawnIODriverMode from './src/pages/Settings/components/PawnIODriverMode.vue'
+      import './src/style.css'
+      import './src/assets/Global.scss'
+      import '@arco-design/web-vue/dist/arco.css'
+      // Development-only page; Vite's normal production entry does not include it.
+      if (window.chrome?.webview)
+        throw new Error('Mock preview must never run inside the hardware host')
+      window.chrome ??= {}
+      const points = Array.from({ length: 32 }, (_, Id) => ({
+        Id,
+        VoltageMicroV: 600000 + Id * 12500,
+        FrequencyKHz: 1200000 + Id * 45000,
+        OffsetKHz: 0,
+      }))
+      const snapshot = {
+        Device: 'MOCK GPU — no hardware connection',
+        Points: points,
+        Offsets: Array(128).fill(0),
+        MinOffsetKHz: -1000000,
+        MaxOffsetKHz: 1000000,
+      }
+      let active = false,
+        seconds = null
+      const result = (Data, Message = '模拟返回：没有硬件操作', Success = true) => ({
+        toJson: async () => JSON.stringify({ Success, Message, Data }),
+      })
+      window.chrome.webview = {
+        hostObjects: {
+          bridge: {
+            NvidiaGpu: {
+              GetVoltageFrequencyCurve: () => result(snapshot),
+              PreviewVoltageFrequencyCurve: (AnchorId, TargetMhz) => {
+                const Offsets = [...snapshot.Offsets]
+                for (const p of points)
+                  if (p.Id >= AnchorId) Offsets[p.Id] = TargetMhz * 1000 - p.FrequencyKHz
+                return result({
+                  Token: 'MOCK',
+                  Plan: { Original: snapshot, AnchorId, TargetMhz, Offsets },
+                })
+              },
+              GetCurveTrialStatus: () =>
+                result({
+                  Active: active,
+                  SecondsRemaining: seconds,
+                  Message: active ? '模拟试用/备份（无硬件操作）' : '模拟环境，尚未应用',
+                }),
+              ApplyVoltageFrequencyCurve: () => {
+                active = true
+                seconds = 60
+                return result(null)
+              },
+              KeepVoltageFrequencyCurve: () => {
+                seconds = null
+                return result(null)
+              },
+              RestoreVoltageFrequencyCurve: () => {
+                active = false
+                seconds = null
+                return result(null)
+              },
+            },
+            SystemInfo: {
+              GetPawnIOStatus: () =>
+                result({
+                  Version: '未安装（模拟）',
+                  ServiceState: '未安装',
+                  BundledVersion: '2.2.0',
+                }),
+              InstallPawnIO: () => result(null, '模拟页面禁止运行安装器', false),
+              OpenUrl: () => result(null, '模拟页面不打开外部链接', false),
+            },
+          },
+        },
+      }
+      createApp({
+        render: () =>
+          h('main', { class: 'max-w-4xl mx-auto p-4 space-y-6 text-ink' }, [
+            h(
+              'p',
+              { class: 'text-red-600' },
+              '开发预览 · 全部为模拟数据 · 不连接硬件 · 不是推荐参数',
+            ),
+            h(GpuCurveEditor),
+            h(PawnIODriverMode),
+          ]),
+      }).mount('#app')
+    </script>
+  </body>
+</html>

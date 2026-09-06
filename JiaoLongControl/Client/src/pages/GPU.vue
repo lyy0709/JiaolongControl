@@ -3,13 +3,13 @@ import { ref, computed, onMounted, onUnmounted, type Ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import {
   NvidiaGpu,
-  type CommandResult,
   type OverclockCapabilities,
 } from '@/utils/bridge'
 import { buildSparkline } from '@/utils/chart'
 import { useConfigStore } from '@/stores/config'
 import { useSystemInfoStore } from '@/stores/systemInfo'
 import { storeToRefs } from 'pinia'
+import GpuCurveEditor from '@/components/GpuCurveEditor.vue'
 
 const configStore = useConfigStore()
 const systemInfoStore = useSystemInfoStore()
@@ -87,10 +87,11 @@ const tempChart = computed(() => generateSvgPath(tempHistory.value, 100))
 const fanChart = computed(() => generateSvgPath(fanSpeedHistory.value, 40)) // Corresponds to 4000 RPM
 
 // --- Settings and Presets Logic ---
-const GPUData = computed(() => configStore.config?.Gpu)
+const GPUData = ref(configStore.config ? { ...configStore.config.Gpu } : undefined)
+const coreRangeReady = ref(false)
+const memRangeReady = ref(false)
 const gpuClockOffset = ref(0)
 const memClockOffset = ref(0)
-const voltageBoostPercent = ref(0)
 const tempWall = ref(87)
 const coreClockRange = ref({ Min: 0, Max: 500 })
 const memClockRange = ref({ Min: 0, Max: 1500 })
@@ -122,6 +123,7 @@ async function fetchGpuRanges() {
     }
 
     if (core.Success && core.Data) {
+      coreRangeReady.value = true
       const min = core.Data.Min ?? 0
       const max = core.Data.Max ?? 500
       coreClockRange.value = { Min: min, Max: max }
@@ -131,6 +133,7 @@ async function fetchGpuRanges() {
     }
 
     if (mem.Success && mem.Data) {
+      memRangeReady.value = true
       const min = mem.Data.Min ?? 0
       const max = mem.Data.Max ?? 1500
       memClockRange.value = { Min: min, Max: max }
@@ -176,19 +179,24 @@ async function fetchGpuRanges() {
 await fetchGpuRanges()
 
 async function handleApplyNormal() {
-  if (!GPUData.value) return
+  if (!GPUData.value || !coreRangeReady.value || !memRangeReady.value) return
+  const draft = { ...GPUData.value }
   loading.value = true
   try {
-    const clockRes = await NvidiaGpu.LockGpuClock(GPUData.value.GpuClock)
+    const clockRes = await NvidiaGpu.LockGpuClock(draft.GpuClock)
     if (!clockRes.Success) {
       Message.error(clockRes.Message || 'GPU 频率锁定失败')
       return
     }
-    const memClockRes = await NvidiaGpu.LockMemoryClock(GPUData.value.MemoryClock)
+    const memClockRes = await NvidiaGpu.LockMemoryClock(draft.MemoryClock)
     if (!memClockRes.Success) {
-      Message.error(memClockRes.Message || '显存频率锁定失败')
+      const reset = await NvidiaGpu.ResetGpuClock()
+      Message.error(`${memClockRes.Message || '显存频率锁定失败'}；核心锁频撤销${reset.Success ? '成功' : '失败，请手动重置'}`)
       return
     }
+    GPUData.value.ClockLockEnabled = true
+    draft.ClockLockEnabled = true
+    if (configStore.config) configStore.config.Gpu = draft
     const saveRes = await configStore.saveConfig()
     if (saveRes?.Success) {
       Message.success('常规设置已应用并保存')
@@ -205,24 +213,18 @@ async function handleApplyNormal() {
 async function handleResetNormal() {
   loading.value = true
   try {
+    // Disable startup restoration even if this driver's reset command is rejected.
+    if (GPUData.value) GPUData.value.ClockLockEnabled = false
+    if (configStore.config) configStore.config.Gpu.ClockLockEnabled = false
+    const saveRes = await configStore.saveConfig()
     const clockRes = await NvidiaGpu.ResetGpuClock()
-    if (!clockRes.Success) {
-      Message.error(clockRes.Message || 'GPU 频率重置失败')
-      return
-    }
     const memClockRes = await NvidiaGpu.ResetMemoryClock()
-    if (!memClockRes.Success) {
-      Message.error(memClockRes.Message || '显存频率重置失败')
+    if (!clockRes.Success || !memClockRes.Success) {
+      Message.error(`重置未完成：核心 ${clockRes.Message}；显存 ${memClockRes.Message}；启动配置${saveRes?.Success ? '已禁用' : '保存失败'}`)
       return
     }
-    if (GPUData.value) {
-      GPUData.value.GpuClock = coreClockRange.value.Max
-      GPUData.value.MemoryClock = memClockRange.value.Max
-      GPUData.value.PowerLimit = powerLimitRange.value.Max
-    }
-    const saveRes = await configStore.saveConfig()
     if (saveRes?.Success) {
-      Message.info('常规设置已恢复默认')
+      Message.info('已请求解除锁频，并禁止启动时恢复锁频；滑块仅保留上次输入')
     } else {
       Message.error(saveRes?.Message || '重置值保存失败')
     }
@@ -233,101 +235,6 @@ async function handleResetNormal() {
   }
 }
 
-async function handleApplyAdvanced() {
-  if (!GPUData.value) return
-  loading.value = true
-  try {
-    if (ocCaps.value.CoreOffset) {
-      const coreRes = await NvidiaGpu.SetCoreClockOffset(gpuClockOffset.value)
-      if (!coreRes.Success) {
-        Message.error(coreRes.Message || '核心频率偏移失败')
-        return
-      }
-    }
-    if (ocCaps.value.MemoryOffset) {
-      const memRes = await NvidiaGpu.SetMemoryClockOffset(memClockOffset.value)
-      if (!memRes.Success) {
-        Message.error(memRes.Message || '显存频率偏移失败')
-        return
-      }
-    }
-    if (ocCaps.value.VoltageBoost) {
-      const voltRes = await NvidiaGpu.SetVoltageBoostPercent(voltageBoostPercent.value)
-      if (!voltRes.Success) {
-        Message.error(voltRes.Message || '核心电压提升设置失败')
-        return
-      }
-    }
-    if (ocCaps.value.ThermalPolicy && tempWall.value !== thermalPolicy.value.CurrentTemp) {
-      const tempRes = await NvidiaGpu.SetGpuThermalPolicy(tempWall.value)
-      if (!tempRes.Success) {
-        Message.error(tempRes.Message || '温度墙设置失败')
-        return
-      }
-      thermalPolicy.value.CurrentTemp = tempWall.value
-    }
-    GPUData.value.CoreClockOffset = gpuClockOffset.value
-    GPUData.value.MemoryClockOffset = memClockOffset.value
-    GPUData.value.VoltageBoostPercent = voltageBoostPercent.value
-    const saveRes = await configStore.saveConfig()
-    if (saveRes?.Success) {
-      Message.success('高级超频已应用并保存')
-    } else {
-      Message.error(saveRes?.Message || '设置保存失败')
-    }
-  } catch {
-    Message.error('应用失败，请检查显卡驱动及桥接服务')
-  } finally {
-    loading.value = false
-  }
-}
-
-async function handleResetAdvanced() {
-  loading.value = true
-  try {
-    if (ocCaps.value.CoreOffset || ocCaps.value.MemoryOffset) {
-      const res = await NvidiaGpu.ResetClockOffsets()
-      if (!res.Success) {
-        Message.error(res.Message || '超频重置失败')
-        return
-      }
-    }
-    if (ocCaps.value.VoltageBoost) {
-      const voltRes = await NvidiaGpu.SetVoltageBoostPercent(0)
-      if (!voltRes.Success) {
-        Message.error(voltRes.Message || '电压提升重置失败')
-        return
-      }
-    }
-    if (
-      ocCaps.value.ThermalPolicy &&
-      tempWall.value !== thermalPolicy.value.DefaultTemp
-    ) {
-      // 温度墙恢复默认失败不阻塞整体重置
-      const tempRes = await NvidiaGpu.SetGpuThermalPolicy(thermalPolicy.value.DefaultTemp)
-      if (tempRes.Success) thermalPolicy.value.CurrentTemp = thermalPolicy.value.DefaultTemp
-    }
-    gpuClockOffset.value = 0
-    memClockOffset.value = 0
-    voltageBoostPercent.value = 0
-    tempWall.value = thermalPolicy.value.DefaultTemp
-    if (GPUData.value) {
-      GPUData.value.CoreClockOffset = 0
-      GPUData.value.MemoryClockOffset = 0
-      GPUData.value.VoltageBoostPercent = 0
-    }
-    const saveRes = await configStore.saveConfig()
-    if (saveRes?.Success) {
-      Message.info('高级超频已重置为默认')
-    } else {
-      Message.error(saveRes?.Message || '重置值保存失败')
-    }
-  } catch {
-    Message.error('重置失败，请检查显卡驱动及桥接服务')
-  } finally {
-    loading.value = false
-  }
-}
 </script>
 
 <template>
@@ -338,7 +245,7 @@ async function handleResetAdvanced() {
         <!-- 头部标题 -->
         <div>
           <h1 class="text-2xl font-bold tracking-wide">GPU 设置</h1>
-          <p class="text-[13px] text-gray-500 mt-1">调整 GPU 的性能参数，发挥显卡最佳性能。</p>
+          <p class="text-[13px] text-gray-500 mt-1">锁频与电压/频率曲线是两种不同功能；调整前请保存工作。</p>
         </div>
 
         <!-- 1. 选择 GPU 与卡片详情 -->
@@ -369,7 +276,7 @@ async function handleResetAdvanced() {
               <span class="text-ink font-medium font-mono">{{ gpuDriverDate }}</span>
             </div>
             <div>
-              <span class="text-gray-600 block mb-0.5">总线宽度</span>
+              <span class="text-gray-600 block mb-0.5">PCIe 通道</span>
               <span class="text-ink font-medium font-mono">{{ gpuBusWidth }}</span>
             </div>
           </div>
@@ -405,6 +312,8 @@ async function handleResetAdvanced() {
           v-if="!showAdvanced"
           class="bg-panel/60 backdrop-blur-md border border-ink/[0.05] rounded-xl p-5 shadow-lg space-y-5"
         >
+          <h2 class="font-semibold">固定锁频（不是降压）</h2>
+          <p class="text-xs text-gray-500">下方为输入值，不是实时读回。读取范围失败时禁止应用；重置不会设置最高频率。</p>
           <div class="space-y-5">
             <div class="space-y-2">
               <div class="flex justify-between items-center text-xs">
@@ -418,6 +327,7 @@ async function handleResetAdvanced() {
               </div>
               <a-slider
                 v-model="GPUData.GpuClock"
+                :disabled="loading || !coreRangeReady"
                 :min="coreClockRange.Min"
                 :max="coreClockRange.Max"
                 class="w-full"
@@ -435,6 +345,7 @@ async function handleResetAdvanced() {
               </div>
               <a-slider
                 v-model="GPUData.MemoryClock"
+                :disabled="loading || !memRangeReady"
                 :min="memClockRange.Min"
                 :max="memClockRange.Max"
                 class="w-full"
@@ -455,12 +366,13 @@ async function handleResetAdvanced() {
           <div class="flex justify-between items-center pt-2 border-t border-ink/[0.04]">
             <button
               class="flex items-center gap-2 text-xs text-gray-400 hover:text-ink border border-ink/10 hover:border-ink/20 bg-ink/[0.02] hover:bg-ink/[0.05] px-4 py-2 rounded-lg transition-colors"
+              :disabled="loading"
               @click="handleResetNormal"
             >
               重置
             </button>
             <button
-              :disabled="loading"
+              :disabled="loading || !coreRangeReady || !memRangeReady"
               class="text-xs font-medium text-ink bg-gradient-to-r from-purple-700 to-indigo-600 hover:from-purple-600 hover:to-indigo-500 disabled:opacity-50 px-6 py-2 rounded-lg transition-all shadow-[0_0_15px_rgba(138,43,226,0.3)]"
               @click="handleApplyNormal"
             >
@@ -469,6 +381,7 @@ async function handleResetAdvanced() {
           </div>
         </div>
 
+        <GpuCurveEditor />
         <!-- 高级超频面板 -->
 <!--        <div-->
 <!--          v-if="showAdvanced"-->

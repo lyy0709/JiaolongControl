@@ -2,13 +2,14 @@ using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using JiaoLongControl.Server.Core.Native;
+using JiaoLongControl.Server.Core.Utils;
 
 namespace JiaoLongControl.Server.Core.Drivers;
 
 /// <summary>
 /// PawnIO 客户端。
-/// 本软件不再附带/管理 PawnIO 内核驱动（PawnIO.sys、PawnIOLib.dll 由用户从官网安装）：
-/// 仅负责加载客户端库与 RyzenSMU 脚本，连接系统中已安装并运行的 PawnIO 驱动。
+/// 官方安装器与签名模块内置；驱动仍须由用户明确安装。
+/// 仅负责加载官方安装目录的客户端库与内置脚本，不自动安装驱动。
 /// 官方下载：https://pawnio.eu/
 /// </summary>
 public class PawnIO : IDisposable
@@ -27,25 +28,29 @@ public class PawnIO : IDisposable
 
     public bool IsInitialized { get; private set; }
 
-    [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-    private static extern int pawnio_open(out IntPtr handle);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int OpenDelegate(out IntPtr handle);
+    private OpenDelegate pawnio_open = null!;
 
-    [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-    private static extern int pawnio_load(IntPtr handle, byte[] blob, UIntPtr size);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int LoadDelegate(IntPtr handle, byte[] blob, UIntPtr size);
+    private LoadDelegate pawnio_load = null!;
 
-    [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-    private static extern int pawnio_execute(
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int ExecuteDelegate(
         IntPtr handle,
         [MarshalAs(UnmanagedType.LPStr)] string name,
-        ulong[] input,
+        [In] ulong[] input,
         UIntPtr inSize,
-        ulong[] output,
+        [Out] ulong[] output,
         UIntPtr outSize,
         out UIntPtr returnSize
     );
+    private ExecuteDelegate pawnio_execute = null!;
 
-    [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-    private static extern int pawnio_close(IntPtr handle);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int CloseDelegate(IntPtr handle);
+    private CloseDelegate pawnio_close = null!;
 
     /// <summary>
     /// 构造时不做任何加载操作，避免在应用启动阶段因驱动问题导致整个程序无法打开（白屏/闪退）。
@@ -55,7 +60,7 @@ public class PawnIO : IDisposable
     {
     }
 
-    public ulong[] Execute(string functionName, ulong[] inputs, int expectedOutputCount)
+    protected ulong[] Execute(string functionName, ulong[] inputs, int expectedOutputCount)
     {
         if (_disposed)
             throw new ObjectDisposedException(nameof(PawnIO));
@@ -74,11 +79,13 @@ public class PawnIO : IDisposable
                 (UIntPtr)inputs.Length,
                 outputs,
                 (UIntPtr)outputs.Length,
-                out _
+                out var returned
             );
 
             if (result != 0)
                 throw new Exception($"Execute {functionName} failed, ErrorCode: 0x{result:X}");
+            if (returned.ToUInt64() != (ulong)expectedOutputCount)
+                throw new Exception($"Execute {functionName} 返回长度异常");
         }
 
         return outputs;
@@ -87,7 +94,7 @@ public class PawnIO : IDisposable
     /// <summary>
     /// 读取指定 MSR 寄存器。由 AMDFamily17.bin 模块提供 ioctl_read_msr。
     /// </summary>
-    public ulong ReadMsr(uint msrIndex)
+    protected ulong ReadMsr(uint msrIndex)
     {
         if (_disposed)
             throw new ObjectDisposedException(nameof(PawnIO));
@@ -101,16 +108,17 @@ public class PawnIO : IDisposable
 
             if (_amd17ExecutorHandle == IntPtr.Zero)
             {
-                string amd17Path = Path.Combine(AppContext.BaseDirectory, "Drivers", "PawnIO", Amd17BlobName);
-                if (!File.Exists(amd17Path))
-                    throw new FileNotFoundException($"缺少 {Amd17BlobName} 脚本文件，请检查安装是否完整");
-
-                if (pawnio_open(out _amd17ExecutorHandle) != 0)
+                byte[] blobData = PawnIOSetup.ReadResource(Amd17BlobName);
+                if (pawnio_open(out var pendingHandle) != 0)
                     throw new Exception("未检测到 PawnIO 驱动服务。请从 https://pawnio.eu/ 下载安装 PawnIO 后重启应用。");
 
-                byte[] blobData = File.ReadAllBytes(amd17Path);
-                if (pawnio_load(_amd17ExecutorHandle, blobData, (UIntPtr)blobData.Length) != 0)
-                    throw new Exception("加载 AMDFamily17 脚本失败");
+                try
+                {
+                    if (pawnio_load(pendingHandle, blobData, (UIntPtr)blobData.Length) != 0)
+                        throw new Exception("加载 AMDFamily17 脚本失败");
+                    _amd17ExecutorHandle = pendingHandle;
+                }
+                catch { pawnio_close(pendingHandle); throw; }
             }
         }
 
@@ -127,11 +135,12 @@ public class PawnIO : IDisposable
                 (UIntPtr)1,
                 outputs,
                 (UIntPtr)1,
-                out _
+                out var returned
             );
 
             if (result != 0)
                 throw new Exception($"Execute ioctl_read_msr failed, ErrorCode: 0x{result:X}");
+            if (returned.ToUInt64() != 1) throw new Exception("MSR 返回长度异常");
 
             return outputs[0];
         }
@@ -154,9 +163,18 @@ public class PawnIO : IDisposable
                 InitCore();
                 IsInitialized = true;
             }
-            catch (Exception ex)
+            catch
             {
-                CleanupHandles();
+                // A telemetry reader may already be waiting on _executeLock. Do not
+                // unload its DLL/AMDFamily17 handle when only RyzenSMU loading failed.
+                lock (_executeLock)
+                {
+                    if (_executorHandle != IntPtr.Zero)
+                    {
+                        try { pawnio_close(_executorHandle); } catch { }
+                        _executorHandle = IntPtr.Zero;
+                    }
+                }
                 throw;
             }
         }
@@ -169,18 +187,19 @@ public class PawnIO : IDisposable
 
         // 内核驱动由用户从官网（https://pawnio.eu/）安装，本软件只连接系统已运行的 PawnIO 服务
 
-        // 按官方用例定位 PawnIOLib.dll：
-        // 1) 应用目录下 Drivers\PawnIO\（兼容旧版部署/手动放置）；
-        // 2) 注册表 Uninstall\PawnIO 的 InstallLocation（官方用例主路径）；
-        // 3) 回退 %ProgramFiles%\PawnIO（官方安装器不允许修改安装路径）；
-        // 4) 最后交给系统 DLL 搜索（仅当 PawnIO 目录已加入 PATH 等搜索路径时有效）。
-        _dllHandle = LoadPawnIOLib(out _);
+        // Only HKLM's official installation location and Program Files; never cwd/PATH.
+        if (_dllHandle == IntPtr.Zero) _dllHandle = LoadPawnIOLib(out _);
 
         if (_dllHandle == IntPtr.Zero)
         {
             int err = Marshal.GetLastWin32Error();
             throw new Exception($"未找到 {DllName}（ErrorCode: {err}）。请从 {PawnIOUrl} 下载安装 PawnIO 后重启应用。");
         }
+
+        pawnio_open = Marshal.GetDelegateForFunctionPointer<OpenDelegate>(NativeLibrary.GetExport(_dllHandle, "pawnio_open"));
+        pawnio_load = Marshal.GetDelegateForFunctionPointer<LoadDelegate>(NativeLibrary.GetExport(_dllHandle, "pawnio_load"));
+        pawnio_execute = Marshal.GetDelegateForFunctionPointer<ExecuteDelegate>(NativeLibrary.GetExport(_dllHandle, "pawnio_execute"));
+        pawnio_close = Marshal.GetDelegateForFunctionPointer<CloseDelegate>(NativeLibrary.GetExport(_dllHandle, "pawnio_close"));
 
         if (pawnio_open(out _executorHandle) != 0)
         {
@@ -192,26 +211,19 @@ public class PawnIO : IDisposable
     {
         EnsureDriver();
 
-        string scriptPath = Path.Combine(AppContext.BaseDirectory, "Drivers", "PawnIO", ScriptBlobName);
-        if (!File.Exists(scriptPath))
-            throw new FileNotFoundException($"缺少 {ScriptBlobName} 脚本文件，请检查安装是否完整");
-
-        byte[] blobData = File.ReadAllBytes(scriptPath);
+        byte[] blobData = PawnIOSetup.ReadResource(ScriptBlobName);
         if (pawnio_load(_executorHandle, blobData, (UIntPtr)blobData.Length) != 0)
             throw new Exception("加载 RyzenSMU 脚本失败");
     }
 
     /// <summary>
     /// 按官方用例（https://github.com/namazso/PawnIO.Modules/wiki/Using-PawnIO-Modules）定位并加载 PawnIOLib.dll。
-    /// 候选顺序：应用目录 Drivers\PawnIO → 注册表 InstallLocation → %ProgramFiles%\PawnIO → 系统 DLL 搜索。
+    /// 候选顺序：注册表 InstallLocation → Program Files\PawnIO。导出从实际加载句柄解析。
     /// </summary>
     /// <param name="loadedFrom">实际加载成功的路径（失败时为空）。</param>
     private IntPtr LoadPawnIOLib(out string loadedFrom)
     {
-        List<string> candidates = new()
-        {
-            Path.Combine(AppContext.BaseDirectory, "Drivers", "PawnIO", DllName),
-        };
+        List<string> candidates = new();
 
         try
         {
@@ -236,7 +248,7 @@ public class PawnIO : IDisposable
 
         foreach (string path in candidates)
         {
-            if (!File.Exists(path))
+            if (!Path.IsPathFullyQualified(path) || !File.Exists(path))
                 continue;
 
             IntPtr handle = Kernel32.LoadLibrary(path);
@@ -247,10 +259,9 @@ public class PawnIO : IDisposable
             }
         }
 
-        // 兜底：交给系统 DLL 搜索路径（官网安装目录通常不在其中，仅个别环境有效）
-        IntPtr fallback = Kernel32.LoadLibrary(DllName);
-        loadedFrom = fallback != IntPtr.Zero ? DllName : string.Empty;
-        return fallback;
+        // Never search the working directory or PATH for a privileged client library.
+        loadedFrom = string.Empty;
+        return IntPtr.Zero;
     }
 
     private void CleanupHandles()

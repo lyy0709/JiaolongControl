@@ -6,6 +6,9 @@ namespace JiaoLongControl.Server.Core.Controllers
 {
     public class SystemInfoController
     {
+        public CommandResult GetPawnIOStatus() => PawnIOSetup.Status();
+        public CommandResult InstallPawnIO(bool acknowledgeDriverInstallation) => PawnIOSetup.Install(acknowledgeDriverInstallation);
+
         public class SystemOverview
         {
             public string CpuName { get; set; } = "Unknown CPU";

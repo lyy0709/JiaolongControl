@@ -63,11 +63,8 @@ namespace JiaoLongControl.Server
 
             base.OnStartup(e);
 
-            Task.Run(async () =>
-            {
-                var updater = new InnoUpdater(version);
-                await updater.CheckForUpdatesAsync();
-            });
+            // Experimental fork uses manual releases only. The upstream updater
+            // targets another repository and must not replace these safety fixes.
 
             var mainWindow = new MainWindow();
             bool startInTray = Environment.GetCommandLineArgs()

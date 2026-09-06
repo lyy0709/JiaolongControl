@@ -13,7 +13,7 @@ namespace JiaoLongControl.Server.Core.Controllers
 {
     [ComVisible(true)]
     [ClassInterface(ClassInterfaceType.AutoDual)]
-    public class NvidiaGpuController : IDisposable
+    public partial class NvidiaGpuController : IDisposable
     {
         public NvidiaGpuController()
         {
@@ -209,7 +209,7 @@ namespace JiaoLongControl.Server.Core.Controllers
                 if (baseMhz == 0 || boostMhz == 0) throw new Exception("Invalid clocks");
                 return new CommandResult(true, "获取成功", new { Min = baseMhz, Max = boostMhz });
             }
-            catch { return new CommandResult(true, "获取成功 (Fallback)", new { Min = 0, Max = 3500 }); }
+            catch { return new CommandResult(false, "无法读取 GPU 时钟范围，已禁止猜测范围"); }
         }
 
         public CommandResult GetGpuMemoryClockRange(int gpuIndex = -1)
@@ -221,35 +221,19 @@ namespace JiaoLongControl.Server.Core.Controllers
                 int boostMem = (int)(gpu.BoostClockFrequencies.MemoryClock.Frequency / 1000);
 
                 if (boostMem == 0) boostMem = (int)(gpu.CurrentClockFrequencies.MemoryClock.Frequency / 1000);
-                if (baseMem == 0) baseMem = Math.Max(0, boostMem - 2000);
-
-                if (boostMem == 0) throw new Exception("Invalid memory clock");
+                if (baseMem == 0 || boostMem == 0) throw new Exception("Invalid memory clock");
 
                 int minMhz = Math.Min(baseMem, boostMem);
                 int maxMhz = Math.Max(baseMem, boostMem);
 
-                if (minMhz == maxMhz || minMhz == 0)
-                {
-                    minMhz = Math.Max(0, maxMhz - 2000);
-                }
-
                 return new CommandResult(true, "获取成功", new { Min = minMhz, Max = maxMhz });
             }
-            catch { return new CommandResult(true, "获取成功 (Fallback)", new { Min = 0, Max = 10000 }); }
+            catch { return new CommandResult(false, "无法读取显存时钟范围，已禁止猜测范围"); }
         }
 
         public CommandResult GetGpuPowerLimitRange(int gpuIndex = -1)
         {
-            try
-            {
-                var gpu = GetGPU(gpuIndex);
-                var info = gpu.PerformanceControl.PowerLimitInformation.First();
-                int minW = (int)(info.MinimumPowerInPCM / 1000);
-                int maxW = (int)(info.MaximumPowerInPCM / 1000);
-                if (maxW == 0) throw new Exception("Invalid power limit");
-                return new CommandResult(true, "获取成功", new { Min = minW, Max = maxW });
-            }
-            catch { return new CommandResult(true, "获取成功 (Fallback)", new { Min = 50, Max = 175 }); }
+            return new CommandResult(false, "私有接口功耗百分比不能作为瓦数；笔记本功耗由 OEM 管理");
         }
 
         public CommandResult LockGpuClock(int freq, int gpuIndex = -1)
@@ -259,6 +243,9 @@ namespace JiaoLongControl.Server.Core.Controllers
 
         public CommandResult LockGpuClock(int minFreq, int maxFreq, int gpuIndex = -1)
         {
+            if (CurveChangesActive) return new CommandResult(false, "请先撤销曲线试用/修改，再锁频");
+            if (minFreq < 100 || maxFreq < minFreq || maxFreq > 3500)
+                return new CommandResult(false, "无效的 GPU 锁频范围");
             var result = RunNvidiaSmi("-i", ResolveGpuIndex(gpuIndex).ToString(), "-lgc", $"{minFreq},{maxFreq}");
             if (!result.Success)
                 return result;
@@ -276,6 +263,7 @@ namespace JiaoLongControl.Server.Core.Controllers
 
         public CommandResult LockMemoryClock(int freq, int gpuIndex = -1)
         {
+            if (freq < 100 || freq > 12000) return new CommandResult(false, "无效的显存频率");
             var result = RunNvidiaSmi("-i", ResolveGpuIndex(gpuIndex).ToString(), "-lmc", $"{freq},{freq}");
             return result.Success ? new CommandResult(true, $"显存频率已锁定 {freq} MHz") : result;
         }
@@ -346,33 +334,8 @@ namespace JiaoLongControl.Server.Core.Controllers
 
         private CommandResult ApplyClockOffsetsInternal(int? coreMhz, int? memoryMhz, int gpuIndex)
         {
-            try
-            {
-                var gpu = NvApiOverclock.GetGpuHandle(gpuIndex);
-                var current = NvApiOverclock.GetClockOffsets(gpu);
-                int core = coreMhz ?? current.CoreMhz;
-                int memory = memoryMhz ?? current.MemoryMhz;
-
-                // 范围读取成功时做夹取, 读取失败(全 0)则交给驱动校验
-                var range = NvApiOverclock.GetClockOffsetRange(gpu);
-                if (range.CoreMaxMhz > range.CoreMinMhz)
-                    core = Math.Clamp(core, range.CoreMinMhz, range.CoreMaxMhz);
-                if (range.MemoryMaxMhz > range.MemoryMinMhz)
-                    memory = Math.Clamp(memory, range.MemoryMinMhz, range.MemoryMaxMhz);
-
-                NvApiOverclock.SetClockOffsets(gpu, core, memory);
-
-                // 写入后读回验证: 本机驱动可能静默忽略偏移 (OEM 锁定), 不做假成功
-                var verify = NvApiOverclock.GetClockOffsets(gpu);
-                if (core != 0 && verify.CoreMhz != core)
-                    return new CommandResult(false,
-                        $"驱动未应用核心偏移 (写入 {core} MHz, 读回 {verify.CoreMhz} MHz)——本机驱动可能已锁定超频");
-                return new CommandResult(true, $"核心偏移 {core:+0;-0} MHz 已应用");
-            }
-            catch (Exception ex)
-            {
-                return new CommandResult(false, $"应用频率偏移失败: {ex.Message}");
-            }
+            // The old global-offset API could leave partially modified curves behind.
+            return new CommandResult(false, "全局偏移写入已禁用，请使用带备份与回滚的实验性曲线编辑器");
         }
 
         public CommandResult GetVoltageBoostPercent(int gpuIndex = -1)
@@ -404,33 +367,12 @@ namespace JiaoLongControl.Server.Core.Controllers
 
         public CommandResult GetGpuPowerPolicy(int gpuIndex = -1)
         {
-            try
-            {
-                var policy = NvApiOverclock.GetPowerPolicy(NvApiOverclock.GetGpuHandle(ResolveGpuIndex(gpuIndex)));
-                return new CommandResult(true, "获取成功", new
-                {
-                    policy.CurrentWatts, policy.MinWatts, policy.DefaultWatts, policy.MaxWatts
-                });
-            }
-            catch (Exception ex)
-            {
-                return new CommandResult(false, $"获取功耗策略失败: {ex.Message}");
-            }
+            return new CommandResult(false, "私有功耗策略单位尚未验证为瓦数，已禁用");
         }
 
         public CommandResult SetGpuPowerPolicy(int watts, int gpuIndex = -1)
         {
-            try
-            {
-                var gpu = NvApiOverclock.GetGpuHandle(ResolveGpuIndex(gpuIndex));
-                NvApiOverclock.SetPowerPolicy(gpu, watts);
-                var policy = NvApiOverclock.GetPowerPolicy(gpu);
-                return new CommandResult(true, $"功耗墙已设置为 {policy.CurrentWatts} W");
-            }
-            catch (Exception ex)
-            {
-                return new CommandResult(false, $"设置功耗墙失败: {ex.Message}");
-            }
+            return new CommandResult(false, "私有功耗策略单位尚未验证为瓦数，已禁用");
         }
 
         public CommandResult GetGpuThermalPolicy(int gpuIndex = -1)
@@ -509,7 +451,7 @@ namespace JiaoLongControl.Server.Core.Controllers
         private CommandResult? _capabilitiesCache;
 
         /// <summary>
-        /// 探测本机驱动实际支持哪些超频能力 (部分 OEM 驱动会静默忽略偏移写入, 只能实测定论)。
+        /// 只读的旧接口能力声明；实验性曲线单独预览/明确确认，不进行试写探测。
         /// 结果按进程缓存, 更换驱动后需重启应用。
         /// </summary>
         public CommandResult GetOverclockCapabilities(int gpuIndex = -1)
@@ -522,12 +464,12 @@ namespace JiaoLongControl.Server.Core.Controllers
             {
                 result = new CommandResult(true, "获取成功", new
                 {
-                    CoreOffset = ProbeCoreOffsetSupported(),
+                    CoreOffset = false,
                     // 现驱动 V/F 偏移表不提供显存通道, 锁频走 nvidia-smi -lmc
                     MemoryOffset = false,
-                    VoltageBoost = ProbeVoltageBoostSupported(),
-                    ThermalPolicy = ProbeThermalPolicySupported(),
-                    PowerPolicy = ProbePowerPolicySupported(),
+                    VoltageBoost = false,
+                    ThermalPolicy = false,
+                    PowerPolicy = false,
                 });
             }
             catch (Exception ex)
@@ -540,26 +482,7 @@ namespace JiaoLongControl.Server.Core.Controllers
 
         private bool ProbeCoreOffsetSupported()
         {
-            try
-            {
-                var gpu = NvApiOverclock.GetGpuHandle(ResolveGpuIndex(-1));
-                var points = NvApiOverclock.GetActiveCurvePoints(gpu);
-                if (points.Length == 0)
-                    return false;
-
-                // 用 +100MHz 的单点探测写入区分"驱动忽略"与温度步进噪声 (±30MHz)
-                int point = points[points.Length / 2];
-                int before = NvApiOverclock.GetCurvePointFrequencyMhz(gpu, point);
-                NvApiOverclock.SetClockPointOffset(gpu, point, 100000);
-                System.Threading.Thread.Sleep(80);
-                int after = NvApiOverclock.GetCurvePointFrequencyMhz(gpu, point);
-                NvApiOverclock.SetClockPointOffset(gpu, point, 0);
-                return after - before > 60;
-            }
-            catch
-            {
-                return false;
-            }
+            return false; // Capability inspection must never write hardware.
         }
 
         private bool ProbeVoltageBoostSupported()
@@ -568,7 +491,6 @@ namespace JiaoLongControl.Server.Core.Controllers
             {
                 var gpu = NvApiOverclock.GetGpuHandle(ResolveGpuIndex(-1));
                 int current = NvApiOverclock.GetVoltageBoostPercent(gpu);
-                NvApiOverclock.SetVoltageBoostPercent(gpu, current); // 写回原值, 仅探测接口可用性
                 return true;
             }
             catch
@@ -583,7 +505,6 @@ namespace JiaoLongControl.Server.Core.Controllers
             {
                 var gpu = NvApiOverclock.GetGpuHandle(ResolveGpuIndex(-1));
                 var policy = NvApiOverclock.GetThermalPolicy(gpu);
-                NvApiOverclock.SetThermalPolicy(gpu, policy.CurrentTemp); // 写回当前值
                 return true;
             }
             catch
@@ -614,6 +535,15 @@ namespace JiaoLongControl.Server.Core.Controllers
 
         private CommandResult RunNvidiaSmi(params string[] arguments)
         {
+            lock (_curveGate)
+            {
+                if (CurveChangesActive) return new CommandResult(false, "请先恢复曲线备份，再操作锁频/功耗");
+                return RunNvidiaSmiCore(arguments);
+            }
+        }
+
+        private CommandResult RunNvidiaSmiCore(params string[] arguments)
+        {
             try
             {
                 var psi = new ProcessStartInfo
@@ -629,9 +559,16 @@ namespace JiaoLongControl.Server.Core.Controllers
                     psi.ArgumentList.Add(arg);
 
                 using var process = Process.Start(psi);
-                string output = process!.StandardOutput.ReadToEnd();
-                string error = process.StandardError.ReadToEnd();
-                process.WaitForExit(5000);
+                if (process == null) return new CommandResult(false, "无法启动 nvidia-smi");
+                var outputTask = process.StandardOutput.ReadToEndAsync();
+                var errorTask = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(5000))
+                {
+                    process.Kill(entireProcessTree: true);
+                    return new CommandResult(false, "nvidia-smi 超时，硬件状态未知，请检查后重试");
+                }
+                string output = outputTask.GetAwaiter().GetResult();
+                string error = errorTask.GetAwaiter().GetResult();
 
                 if (process.ExitCode != 0)
                 {
@@ -649,6 +586,7 @@ namespace JiaoLongControl.Server.Core.Controllers
 
         public void Dispose()
         {
+            DisposeCurveTrial();
             try { NVIDIA.Unload(); } catch { }
             GC.SuppressFinalize(this);
         }

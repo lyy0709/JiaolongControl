@@ -686,64 +686,21 @@ namespace JiaoLongControl.Server.Core.Native
         }
 
         /// <summary>
-        /// 设置核心 V/F 曲线偏移。驱动要求每次调用 mask 仅一位置 1 (LACT #936 在 RTX 5090 实测协议)，
-        /// 因此逐点提交。显存偏移在现驱动上不走该表，传非 0 会抛 NotSupportedException。
+        /// Legacy global writes are disabled. Use the transactional curve service.
         /// </summary>
         public static void SetClockOffsets(IntPtr gpu, int coreDeltaMhz, int memoryDeltaMhz)
         {
-            if (memoryDeltaMhz != 0)
-                throw new NotSupportedException("当前驱动不支持通过该接口设置显存频率偏移 (可使用锁频功能替代)");
-
-            // 重置时若当前本就无偏移, 跳过逐点写入
-            if (coreDeltaMhz == 0 && GetClockOffsets(gpu).CoreMhz == 0)
-                return;
-
-            var points = GetActiveCurvePoints(gpu);
-            int khz = coreDeltaMhz * 1000;
-
-            // 金丝雀点: 先写一个点读回验证。部分 OEM 驱动会静默忽略偏移写入,
-            // 此时立即中止, 避免上百次无效调用阻塞 UI 线程
-            int canary = points[points.Length / 2];
-            int before = GetCurvePointFrequencyMhz(gpu, canary);
-            SetClockPointOffset(gpu, canary, khz);
-            int after = GetCurvePointFrequencyMhz(gpu, canary);
-            if (Math.Abs((after - before) - coreDeltaMhz) > 40)
-                throw new NotSupportedException("驱动未接受频率偏移——本机驱动可能已锁定超频 (OEM 限制)");
-
-            int failed = 0;
-            foreach (int point in points)
-            {
-                try
-                {
-                    SetClockPointOffset(gpu, point, khz);
-                }
-                catch (NvApiStatusException)
-                {
-                    // 个别曲线点 (如省电拐点) 可能被驱动拒绝, 跳过继续
-                    failed++;
-                }
-            }
-            if (failed >= points.Length)
-                throw new NvApiStatusException(-1);
+            throw new NotSupportedException("全局偏移写入已禁用，必须使用带备份与回滚的曲线事务");
         }
 
         public static int[] GetActiveCurvePoints(IntPtr gpu)
         {
-            try
-            {
-                var status = ReadClockVfStatus(gpu);
-                var points = new List<int>();
-                for (int i = 0; i < status.Entries.Length; i++)
-                    if (status.Entries[i].FrequencyKHz > 0)
-                        points.Add(i);
-                if (points.Count > 0)
-                    return points.ToArray();
-            }
-            catch (NvApiStatusException)
-            {
-                // 曲线读取不可用时退化为全部点
-            }
-            return Enumerable.Range(0, 128).ToArray();
+            var status = ReadClockVfStatus(gpu);
+            var points = Enumerable.Range(0, status.Entries.Length).Where(i =>
+                (status.Mask[i >> 5] & (1u << (i & 31))) != 0 &&
+                status.Entries[i].FrequencyKHz > 0 && status.Entries[i].VoltageMicroV > 0).ToArray();
+            if (points.Length == 0) throw new NotSupportedException("驱动未返回有效曲线点");
+            return points;
         }
 
         public static void SetClockPointOffset(IntPtr gpu, int point, int offsetKHz)

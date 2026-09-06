@@ -35,6 +35,7 @@ export interface CpuSectionType {
 }
 
 export interface GpuSectionType {
+  ClockLockEnabled: boolean
   GpuClock: number
   MemoryClock: number
   PowerLimit: number

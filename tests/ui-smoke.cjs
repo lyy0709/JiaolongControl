@@ -1,0 +1,30 @@
+// Run with a Playwright installation available via NODE_PATH. Browser is ephemeral.
+const { chromium } = require('playwright')
+const path = require('node:path')
+const assert = require('node:assert/strict')
+;(async () => {
+  const browser = await chromium.launch({ channel: 'msedge', headless: true })
+  try {
+    const page = await browser.newPage({ viewport: {width: 1024, height: 1100} })
+    const errors = []
+    page.on('pageerror', e => errors.push(e.message))
+    await page.goto('http://127.0.0.1:5179/safe-tuning-preview.html')
+    await page.getByRole('button', {name: '读取曲线（只读）'}).click()
+    await page.getByLabel('电压锚点', {exact: true}).click()
+    await page.getByText('800 mV · 1920 MHz', {exact: true}).click()
+    await page.getByRole('spinbutton', {name: '目标频率'}).fill('1950')
+    await page.getByRole('button', {name: '生成预览（不写入）'}).click()
+    await page.getByRole('button', {name: '试用 60 秒'}).waitFor()
+    assert(await page.getByRole('button', {name: '试用 60 秒'}).isDisabled())
+    await page.screenshot({path: path.join(__dirname, '../bin/curve-ui-desktop.png'), fullPage: true})
+    await page.setViewportSize({width: 560, height: 1050})
+    await page.screenshot({path: path.join(__dirname, '../bin/curve-ui-narrow.png'), fullPage: true})
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    await page.getByText('我理解可能黑屏或重启；已关闭其他调参程序，并先重置锁频', {exact: true}).click()
+    await page.getByRole('button', {name: '试用 60 秒'}).click()
+    await page.getByRole('button', {name: '恢复备份中的原偏移'}).click()
+    assert(await page.getByRole('button', {name: '打开内置安装器'}).isDisabled())
+    assert.deepEqual(errors, [])
+    console.log('PASS real Vue/Arco mock UI: preview, consent, trial, restore, installer gate, 1024/560px layout; no hardware host')
+  } finally { await browser.close() }
+})().catch(e => {console.error(e); process.exitCode = 1})

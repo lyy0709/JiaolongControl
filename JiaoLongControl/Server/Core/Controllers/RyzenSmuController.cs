@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using Microsoft.Win32;
 using JiaoLongControl.Server.Core.Drivers;
 using JiaoLongControl.Server.Core.Utils;
@@ -7,6 +8,7 @@ namespace JiaoLongControl.Server.Core.Controllers;
 
 public enum RyzenSmuFamily
 {
+    Unknown = -1,
     AM5_V1,         // Dragon Range 
     FP7_FP8,        // Rembrandt / Phoenix / HawkPoint
     FP7_FP8_Strix,  // Strix Point / Krackan Point / Strix Halo 
@@ -17,7 +19,8 @@ public enum RyzenSmuFamily
 [ClassInterface(ClassInterfaceType.AutoDual)]
 public class RyzenSmuController : PawnIO 
 {
-    public RyzenSmuFamily CurrentFamily { get; set; } = RyzenSmuFamily.AM5_V1;
+    private static readonly object SmuTransactionLock = new();
+    public RyzenSmuFamily CurrentFamily { get; private set; } = RyzenSmuFamily.Unknown;
 
     public RyzenSmuController()
     {
@@ -34,16 +37,7 @@ public class RyzenSmuController : PawnIO
                 }
             }
 
-            if (cpuName.Contains("7945") || cpuName.Contains("7845") || cpuName.Contains("7745"))
-                CurrentFamily = RyzenSmuFamily.AM5_V1;
-            else if (cpuName.Contains("HX 370") || cpuName.Contains("AI 9") || cpuName.Contains("AI 7") || cpuName.Contains("365") || cpuName.Contains("370") || cpuName.Contains("Strix"))
-                CurrentFamily = RyzenSmuFamily.FP7_FP8_Strix;
-            else if (cpuName.Contains("7735") || cpuName.Contains("6800") || cpuName.Contains("6900") || cpuName.Contains("7840") || cpuName.Contains("7940") || cpuName.Contains("8840") || cpuName.Contains("8845"))
-                CurrentFamily = RyzenSmuFamily.FP7_FP8;
-            else if (cpuName.Contains("5800") || cpuName.Contains("5900") || cpuName.Contains("5600") || cpuName.Contains("4800") || cpuName.Contains("4600"))
-                CurrentFamily = RyzenSmuFamily.FP6;
-            else
-                CurrentFamily = RyzenSmuFamily.AM5_V1;
+            CurrentFamily = DetectFamily(cpuName);
         }
         catch { }
     }
@@ -62,6 +56,28 @@ public class RyzenSmuController : PawnIO
     }
 
     private CommandResult Send(uint cmd, uint arg, bool isMp1, string name)
+    {
+        if (CurrentFamily == RyzenSmuFamily.Unknown) return new CommandResult(false, "未知 CPU 协议，禁止回退到 AM5 寄存器写入");
+        var error = TuningValidation.SmuError(name, arg);
+        if (error != null) return new CommandResult(false, error);
+        lock (SmuTransactionLock) return SendCore(cmd, arg, isMp1, name);
+    }
+
+    [ComVisible(false)]
+    public static RyzenSmuFamily DetectFamily(string cpuName)
+    {
+        // Do not match desktop 5900X as mobile 5900HX, or every future "AI 9".
+        if (string.IsNullOrWhiteSpace(cpuName) || !Regex.IsMatch(cpuName, @"\bAMD\b", RegexOptions.IgnoreCase))
+            return RyzenSmuFamily.Unknown;
+        bool Match(string pattern) => Regex.IsMatch(cpuName, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (Match(@"\b(7945HX3D|7945HX|7845HX|7745HX)\b")) return RyzenSmuFamily.AM5_V1;
+        if (Match(@"\bAI 9 (HX 370|365)\b")) return RyzenSmuFamily.FP7_FP8_Strix;
+        if (Match(@"\b(7735(H|HS|U)|6800(H|HS|U)|6900(HX|HS)|7840(H|HS|U)|7940HS|8840(HS|U)|8845HS)\b")) return RyzenSmuFamily.FP7_FP8;
+        if (Match(@"\b(5800(H|HS|U)|5900(HX|HS)|5600(H|HS|U)|4800(H|HS|U)|4600(H|HS|U))\b")) return RyzenSmuFamily.FP6;
+        return RyzenSmuFamily.Unknown;
+    }
+
+    private CommandResult SendCore(uint cmd, uint arg, bool isMp1, string name)
     {
         uint addrMsg, addrRsp, addrArg;
 
@@ -123,7 +139,7 @@ public class RyzenSmuController : PawnIO
             if (rsp == 1) return new CommandResult(true, $"{name} 设置成功");
             if (rsp == 0xFD) return new CommandResult(false, $"{name} 设置失败: 条件不满足");
             if (rsp == 0xFC) return new CommandResult(false, $"{name} 设置失败: 指令被拒绝(繁忙)");
-            if (rsp == 0xFE) return new CommandResult(false, $"{name} 设置失败: 未知指令");
+            if (rsp == 0xFE) return new CommandResult(false, $"{name} 设置失败: 未知指令", rsp);
 
             return new CommandResult(false, $"{name} 设置失败: SMU 错误码 0x{rsp:X}");
         }
@@ -139,7 +155,7 @@ public class RyzenSmuController : PawnIO
         foreach (var (cmd, isMp1) in commands)
         {
             lastResult = Send(cmd, arg, isMp1, name);
-            if (lastResult.Success)
+            if (lastResult.Success || lastResult.Data is not uint status || status != 0xFE)
             {
                 return lastResult;
             }
@@ -150,6 +166,7 @@ public class RyzenSmuController : PawnIO
     #region (Power Limits - PPT)
     public CommandResult SetStapmLimit(double watts)
     {
+        if (!TuningValidation.InRange(watts, 5, 150)) return new CommandResult(false, "功耗必须为 5–150 W");
         uint arg = (uint)(watts * 1000);
         return CurrentFamily switch {
             RyzenSmuFamily.FP6 => TrySend(arg, "STAPM Limit", (0x14, true), (0x31, false)),
@@ -171,6 +188,7 @@ public class RyzenSmuController : PawnIO
 
     public CommandResult SetFastLimit(double watts)
     {
+        if (!TuningValidation.InRange(watts, 5, 150)) return new CommandResult(false, "功耗必须为 5–150 W");
         uint arg = (uint)(watts * 1000);
         return CurrentFamily switch {
             RyzenSmuFamily.FP6 => TrySend(arg, "Fast Limit", (0x15, true), (0x32, false)),
@@ -182,6 +200,7 @@ public class RyzenSmuController : PawnIO
 
     public CommandResult SetSlowLimit(double watts)
     {
+        if (!TuningValidation.InRange(watts, 5, 150)) return new CommandResult(false, "功耗必须为 5–150 W");
         uint arg = (uint)(watts * 1000);
         return CurrentFamily switch {
             RyzenSmuFamily.FP6 => TrySend(arg, "Slow Limit", (0x16, true), (0x33, false)),
@@ -203,6 +222,7 @@ public class RyzenSmuController : PawnIO
 
     public CommandResult SetPptLimitRsmu(double watts)
     {
+        if (!TuningValidation.InRange(watts, 5, 150)) return new CommandResult(false, "功耗必须为 5–150 W");
         uint cmd = CurrentFamily switch { 
             RyzenSmuFamily.FP6 => 0x33u, 
             RyzenSmuFamily.FP7_FP8 => 0x31u, 
@@ -352,6 +372,7 @@ public class RyzenSmuController : PawnIO
     #region (Curve Optimizer)
     public CommandResult SetCurveOptimizerAll(int value)
     {
+        if (value is < -30 or > 0) return new CommandResult(false, "安全模式 CO 范围为 -30–0；范围内仍须验证稳定性");
         uint arg = (uint)value & 0xFFFFFu;
         return CurrentFamily switch {
             RyzenSmuFamily.FP6 => TrySend(arg, "Curve Optimizer All", (0x55, true), (0xB1, false)),
@@ -363,14 +384,7 @@ public class RyzenSmuController : PawnIO
 
     public CommandResult SetCurveOptimizerPerCore(uint coreIdx, int value)
     {
-        uint coValue = (uint)value & 0xFFFFFu;
-        uint arg = (coreIdx << 20) | coValue;
-        return CurrentFamily switch {
-            RyzenSmuFamily.FP6 => TrySend(arg, $"Curve Optimizer Core {coreIdx}", (0x54, true), (0x52, false)),
-            RyzenSmuFamily.FP7_FP8 => TrySend(arg, $"Curve Optimizer Core {coreIdx}", (0x4B, true), (0x53, false)),
-            RyzenSmuFamily.FP7_FP8_Strix => TrySend(arg, $"Curve Optimizer Core {coreIdx}", (0x4B, true), (0x53, false)),
-            _ => TrySend(arg, $"Curve Optimizer Core {coreIdx}", (0x35, true), (0x06, false))
-        };
+        return new CommandResult(false, "单核编号/CCD 映射尚未验证，已禁用单核写入；请使用全核 CO");
     }
     #endregion
 
@@ -453,8 +467,8 @@ public class RyzenSmuController : PawnIO
         try
         {
             double ppt = 0;
-            double tdc = 0;
-            double edc = 0;
+            double? tdc = null;
+            double? edc = null;
             double temp = 0;
             double freq = 0;
             int usage = 0;
@@ -479,8 +493,6 @@ public class RyzenSmuController : PawnIO
                             case LibreHardwareMonitor.Hardware.SensorType.Power:
                                 if (sensor.Name.Contains("Package") && ppt == 0)
                                     ppt = Math.Round(val, 1);
-                                if (sensor.Name.Contains("Core") && tdc == 0)
-                                    tdc = Math.Round(val, 1);
                                 break;
 
                             case LibreHardwareMonitor.Hardware.SensorType.Temperature:
@@ -503,8 +515,7 @@ public class RyzenSmuController : PawnIO
                         }
                     }
 
-                    if (tdc > 0)
-                        edc = Math.Round(tdc * 1.3, 1);
+                    // Power (W) is not current (A). Do not fabricate TDC/EDC.
 
                     break;
                 }

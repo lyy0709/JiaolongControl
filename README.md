@@ -1,5 +1,10 @@
 ﻿<h1 align="center">JiaoLongControl</h1>
 
+> 本分支是 **10.13.25 的实验性安全修复 fork**，不是已验证稳定的正式发行版。
+> 新增 GPU V/F 曲线读取/预览、限时试用与备份恢复，内置官方签名 PawnIO 安装器。
+> **未完成 4060 Laptop 实机写入验证；示例曲线与输入边界不是推荐参数。**
+> 详细变更、限制、构建与恢复方法见 [安全调参说明](Doc/SAFE_TUNING.md)。
+
 <p align="center">
   <strong>蛟龙 16 PRO 笔记本硬件控制中心</strong><br>
   <em>基于 7945HX + RTX 4060 版本开发，理论兼容其他 16 PRO [2023] 版本</em>
@@ -24,7 +29,7 @@
 
 ### CPU
 - **功率控制** — 短时功率 (SPL) / 长时功率 (SPP) 调节
-- **温度墙** — 60°C ~ 105°C 可设
+- **温度墙** — 本分支限制为 60°C ~ 100°C
 - **睿频开关** — 通过 `powercfg` 修改电源计划
 - **最大频率限制** — 支持 AC / DC 分别设定
 - **实时监控** — 温度、使用率、频率、电压
@@ -33,7 +38,8 @@
 - **显卡模式切换** — 混合输出 / 独显直连
 - **核心频率锁定** — 锁定指定频率，支持范围检测
 - **显存频率锁定** — 同上
-- **功耗限制** — mW 级精度调节
+- **V/F 曲线（实验性）** — 原生点选择、平台预览、60 秒试用、原偏移备份及恢复；不是硬电压锁
+- **功耗限制** — 不把私有接口百分比误报为瓦数，相关旧接口禁用
 - **解锁 DB** — 通过 NVPCF 驱动解锁 GPU 功率上限
 - **实时监控** — 使用率、显存占用、核心/显存频率、温度、风扇转速
 
@@ -41,9 +47,9 @@
 - **功耗限制** — STAPM / Fast PPT / Slow PPT / PPT
 - **电流限制** — VRM / TDC / EDC
 - **温度限制** — MP1 / RSMU
-- **PBO** — Scalar / OC Clock / Per-Core OC Clock
-- **Curve Optimizer** — 全核 / 分核，正压 / 降压
-- 自动检测 CPU 家族（Dragon Range / FP7 / FP8 / Strix / FP6）
+- **协议保护** — 固定 OC 频率/电压、单核映射未经验证，暂时禁用；未知家族禁止回退写寄存器
+- **Curve Optimizer** — 全核 -30～0 的输入保护（不保证稳定）；普通 CPU 设置不再强制附带 CO 写入
+- 自动识别已列出的 CPU 家族（Dragon Range / FP7 / FP8 / Strix / FP6），未识别时禁止 SMU 写入
 
 ### 风扇
 - **手动控制** — CPU / GPU 风扇独立调速
@@ -67,10 +73,12 @@
 
 ## 使用说明
 
-1. 从 [Releases](../../releases) 下载最新安装包
-2. 运行安装程序（Inno Setup）
-3. 启动后会在系统托盘显示图标，右键可显示主界面或退出
-4. 在设置页可配置开机自启和启动最小化
+1. 从 [本 fork 的 Releases](https://github.com/lyy0709/JiaolongControl/releases) 下载标注为实验性预发布的 Windows x64 ZIP，核对 SHA-256。
+2. 从托盘退出旧版，将整个 ZIP 解压到新目录，不覆盖旧版、不复制旧配置。
+3. 先阅读包内 `READ-ME-FIRST.md`，再运行 `JiaoLongControl.exe`。包含 .NET 8，仍需 WebView2 Runtime。
+4. 首次只读检查，不启用开机自动调参。本分支关闭上游自动更新；SMU / CO 仍需 PawnIO。
+
+详见 [首次部署和恢复说明](Doc/RELEASE_FIRST_RUN.md)。
 
 > **注意：** 修改硬件参数有一定风险，请确保理解各项设置的含义后再操作。使用前建议备份当前配置。
 
@@ -79,16 +87,16 @@
 ## 开发
 
 ```bash
-# 前端开发（需要 Node.js 18+）
+# 前端开发（建议受支持的 Node.js 22.22.2+ 或 24.15+，锁定依赖含 jsdom 30）
 cd JiaoLongControl/Client
-npm install
+npm ci
 npm run dev
 
 # 后端构建（需要 .NET 8 SDK）
 dotnet build JiaoLongControl/JiaoLongControl.csproj
 
-# 发布
-dotnet publish JiaoLongControl/JiaoLongControl.csproj -c Release
+# 从仓库根目录以 PowerShell 打包（先在 Client 执行 npm ci）
+# powershell -File scripts/build-safe-release.ps1
 ```
 
 前端开发时 Vite dev server 运行在 `localhost:5173`，后端 WebView2 在开发模式下指向该地址。
@@ -98,6 +106,8 @@ dotnet publish JiaoLongControl/JiaoLongControl.csproj -c Release
 ## 许可证
 
 [MIT](LICENSE.md) © 2025 GaoXanSheng
+
+PawnIO 安装包和模块保留其原许可；安装包并非 MIT。见 [安装包说明](JiaoLongControl/Drivers/PawnIO/SETUP-NOTICE.md)。
 
 ---
 

@@ -10,6 +10,7 @@ import type { CpuProfileDataType } from '@/types/config'
 import { CPU_PROFILE_DEFAULTS } from '@/constants'
 
 const loading = ref(false)
+const applyCo = ref(false)
 const configStore = useConfigStore()
 const systemInfoStore = useSystemInfoStore()
 
@@ -24,8 +25,8 @@ if (infoResult.Success) {
 }
 
 // 使用 computed 来简化对配置项的访问，并确保响应性
-const CPUData = computed(() => configStore.config?.Cpu)
-const SmuData = computed(() => configStore.config?.Smu)
+const CPUData = ref(configStore.config ? JSON.parse(JSON.stringify(configStore.config.Cpu)) as typeof configStore.config.Cpu : undefined)
+const SmuData = ref(configStore.config ? { ...configStore.config.Smu } : undefined)
 const cpuStats = computed(() => systemInfoStore.cpuStats)
 
 // 页面内部交互状态
@@ -69,35 +70,46 @@ function selectProfile(profile: string) {
 
 // 统一应用逻辑
 async function handleApplyAll() {
-  if (!CPUData.value || !activeProfile.value) return
+  if (!CPUData.value || !activeProfile.value || loading.value) return
+  const cpuDraft = JSON.parse(JSON.stringify(CPUData.value)) as NonNullable<typeof CPUData.value>
+  const p = cpuDraft[profileKey(selectedProfile.value)]
+  const coDraft = SmuData.value?.CurveOptimizerAll
+  const includeCo = applyCo.value
+  const valid = (v: number, min: number, max: number) => Number.isInteger(v) && v >= min && v <= max
+  if (!valid(p.CpuLongPower, 5, 120) || !valid(p.CpuShortPower, 5, 150) ||
+      !valid(p.CpuTempWall, 60, 100) || !valid(p.CpuMaxFrequency, 1000, 5400) ||
+      (includeCo && !valid(coDraft ?? NaN, -30, 0))) {
+    Message.error('存在超出当前保护范围的旧参数，请先调整；尚未写入硬件')
+    return
+  }
   loading.value = true
   try {
     // 1. 设置长时功耗限制 (PL1)
-    const longPowerRes = await CPU.SetCpuLongPower(activeProfile.value.CpuLongPower)
+    const longPowerRes = await CPU.SetCpuLongPower(p.CpuLongPower)
     if (!longPowerRes.Success) {
       Message.error(longPowerRes.Message || '长时功耗限制设置失败')
       return
     }
     // 2. 设置短时功耗限制 (PL2)
-    const shortPowerRes = await CPU.SetCpuShortPower(activeProfile.value.CpuShortPower)
+    const shortPowerRes = await CPU.SetCpuShortPower(p.CpuShortPower)
     if (!shortPowerRes.Success) {
       Message.error(shortPowerRes.Message || '短时功耗限制设置失败')
       return
     }
     // 3. 设置温度墙
-    const tempWallRes = await CPU.SetCPUTempWall(activeProfile.value.CpuTempWall)
+    const tempWallRes = await CPU.SetCPUTempWall(p.CpuTempWall)
     if (!tempWallRes.Success) {
       Message.error(tempWallRes.Message || '温度墙设置失败')
       return
     }
     // 4. 设置最大频率
-    const maxFreqRes = await Power.SetCPUMaxFrequency(activeProfile.value.CpuMaxFrequency)
+    const maxFreqRes = await Power.SetCPUMaxFrequency(p.CpuMaxFrequency)
     if (!maxFreqRes.Success) {
       Message.error(maxFreqRes.Message || '最大频率设置失败')
       return
     }
     // 5. 设置睿频开关
-    if (activeProfile.value.CpuTurbo) {
+    if (p.CpuTurbo) {
       const turboRes = await Power.EnableTurbo()
       if (!turboRes.Success) {
         Message.error(turboRes.Message || '睿频开启失败')
@@ -111,8 +123,8 @@ async function handleApplyAll() {
       }
     }
     // 6. 设置核心电压偏移 (Curve Optimizer All)
-    if (configStore.config?.Smu) {
-      const curveRes = await RyzenSmu.SetCurveOptimizerAll(configStore.config.Smu.CurveOptimizerAll)
+    if (includeCo && coDraft !== undefined) {
+      const curveRes = await RyzenSmu.SetCurveOptimizerAll(coDraft)
       if (!curveRes.Success) {
         Message.error(curveRes.Message || '核心电压偏移设置失败')
         return
@@ -120,14 +132,18 @@ async function handleApplyAll() {
     }
 
     // 7. 保存主配置（含当前档位块参数与选中档位，供开机自启等使用）
+    if (configStore.config) {
+      configStore.config.Cpu = cpuDraft
+      if (includeCo && coDraft !== undefined) configStore.config.Smu.CurveOptimizerAll = coDraft
+    }
     const saveRes = await configStore.saveConfig()
     if (saveRes?.Success) {
-      Message.success('设置应用成功')
+      Message.success('各项命令已接受并保存；不代表稳定性验证通过')
     } else {
       Message.error(saveRes?.Message || '设置保存失败')
     }
   } catch {
-    Message.error('应用设置失败，请检查桥接服务。')
+    Message.error('应用未完成，前面成功的步骤可能已生效；未保存新配置。请检查桥接服务。')
   } finally {
     loading.value = false
   }
@@ -139,18 +155,19 @@ async function handleReset() {
   const defaults = CPU_PROFILE_DEFAULTS[key]
   if (!CPUData.value || !defaults) return
   Object.assign(CPUData.value[key], defaults)
-  const saveRes = await configStore.saveConfig()
   const profileTitle = profiles.find((p) => p.key === selectedProfile.value)?.title ?? ''
-  if (saveRes?.Success) {
-    Message.info(`「${profileTitle}」参数已恢复为出厂默认`)
-  } else {
-    Message.error(saveRes?.Message || '重置值保存失败')
-  }
+  Message.info(`「${profileTitle}」输入已重置为项目预设，尚未应用；CO 不受影响`)
 }
 
 // 取消修改：强制从后端重新加载原始配置
 async function handleCancel() {
   await configStore.fetchConfig(true) // 重新加载 store 原始配置
+  if (configStore.config) {
+    CPUData.value = JSON.parse(JSON.stringify(configStore.config.Cpu))
+    SmuData.value = { ...configStore.config.Smu }
+    selectedProfile.value = configStore.config.Cpu.CpuProfile
+  }
+  applyCo.value = false
   Message.info('已取消修改')
 }
 </script>
@@ -207,7 +224,7 @@ async function handleCancel() {
             <div class="space-y-2">
               <div class="flex justify-between items-center text-xs">
                 <span class="text-gray-300 flex items-center gap-1"
-                  >功耗限制 (PL1)
+                  >长期功耗限制 (PL1)
                   <span class="text-gray-500 cursor-pointer text-[10px] hover:text-gray-300"
                     >ⓘ</span
                   ></span
@@ -216,14 +233,14 @@ async function handleCancel() {
                   >{{ activeProfile.CpuLongPower }} W</span
                 >
               </div>
-              <a-slider v-model="activeProfile.CpuLongPower" :min="30" :max="255" class="w-full" />
+              <a-slider v-model="activeProfile.CpuLongPower" :min="5" :max="120" class="w-full" />
             </div>
 
             <!-- 长时功耗限制 (PL2) -->
             <div class="space-y-2">
               <div class="flex justify-between items-center text-xs">
                 <span class="text-gray-300 flex items-center gap-1"
-                  >长时功耗限制 (PL2)
+                  >短期功耗限制 (PL2)
                   <span class="text-gray-500 cursor-pointer text-[10px] hover:text-gray-300"
                     >ⓘ</span
                   ></span
@@ -232,7 +249,7 @@ async function handleCancel() {
                   >{{ activeProfile.CpuShortPower }} W</span
                 >
               </div>
-              <a-slider v-model="activeProfile.CpuShortPower" :min="30" :max="255" class="w-full" />
+              <a-slider v-model="activeProfile.CpuShortPower" :min="5" :max="150" class="w-full" />
             </div>
 
             <!-- 核心电压偏移 (Curve Optimizer) -->
@@ -245,16 +262,19 @@ async function handleCancel() {
                   ></span
                 >
                 <span class="text-purple-400 font-medium font-mono">{{
-                  configStore.config?.Smu?.CurveOptimizerAll ?? 0
+                  SmuData?.CurveOptimizerAll ?? 0
                 }}</span>
               </div>
               <a-slider
                 v-if="SmuData"
                 v-model="SmuData.CurveOptimizerAll"
-                :min="-50"
-                :max="50"
+                :min="-30"
+                :max="0"
                 class="w-full"
               />
+              <a-checkbox v-model="applyCo">本次同时应用 CO（需要 PawnIO；默认不勾选）</a-checkbox>
+              <p class="text-xs text-gray-500">基本功耗/频率设置不依赖 PawnIO。重置档位不会清除 CO；撤销降压请设为 0 并勾选应用。显示值为配置，不是硬件读回。</p>
+              <p class="text-xs text-amber-600">分步应用不是原子操作：中途失败时，先前成功的步骤仍可能生效。请勿同时运行其他硬件调参工具。</p>
             </div>
 
             <!-- CPU 温度墙 -->
@@ -270,7 +290,7 @@ async function handleCancel() {
                   >{{ activeProfile.CpuTempWall }} °C</span
                 >
               </div>
-              <a-slider v-model="activeProfile.CpuTempWall" :min="60" :max="105" class="w-full" />
+              <a-slider v-model="activeProfile.CpuTempWall" :min="60" :max="100" class="w-full" />
             </div>
 
             <!-- 最大睿频频率 -->
@@ -311,7 +331,7 @@ async function handleCancel() {
                 d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89M9 11l3-3 3 3m-3-3v12"
               />
             </svg>
-            重置
+            重置输入
           </button>
 
           <div class="flex gap-3">

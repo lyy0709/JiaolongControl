@@ -11,7 +11,10 @@
         <Configurations>Debug;Release</Configurations>
         <Platforms>x64</Platforms>
         <SatelliteResourceLanguages>zh-CN</SatelliteResourceLanguages>
-        <AppVersion>10.13.25</AppVersion>
+        <AppVersion>10.13.25-safe.1</AppVersion>
+        <Version>10.13.25-safe.1</Version>
+        <AssemblyVersion>10.13.25.1</AssemblyVersion>
+        <FileVersion>10.13.25.1</FileVersion>
     </PropertyGroup>
 
     <ItemGroup>
@@ -48,6 +51,9 @@
     </ItemGroup>
     <ItemGroup>
         <EmbeddedResource Include="Server\Resources\Icons\app.ico" />
+        <EmbeddedResource Include="Drivers\PawnIO\PawnIO_setup.exe" LogicalName="JiaoLongControl.PawnIO.PawnIO_setup.exe" />
+        <EmbeddedResource Include="Drivers\PawnIO\RyzenSMU.bin" LogicalName="JiaoLongControl.PawnIO.RyzenSMU.bin" />
+        <EmbeddedResource Include="Drivers\PawnIO\AMDFamily17.bin" LogicalName="JiaoLongControl.PawnIO.AMDFamily17.bin" />
         <None Update="Drivers\PawnIO\PawnIO.LICENSE.txt">
           <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </None>

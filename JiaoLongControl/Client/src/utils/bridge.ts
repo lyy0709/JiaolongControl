@@ -125,6 +125,12 @@ export interface OverclockCapabilities {
   PowerPolicy: boolean
 }
 
+export interface CurvePoint { Id: number; VoltageMicroV: number; FrequencyKHz: number; OffsetKHz: number }
+export interface CurveSnapshot { Device: string; Points: CurvePoint[]; Offsets: number[]; MinOffsetKHz: number; MaxOffsetKHz: number }
+export interface CurvePreview { Token: string; Plan: { Original: CurveSnapshot; AnchorId: number; TargetMhz: number; Offsets: number[] } }
+export interface CurveTrialStatus { Active: boolean; SecondsRemaining: number | null; Message: string }
+export interface PawnIOStatus { Version: string; ServiceState: string; BundledVersion: string }
+
 export interface SmuTelemetry {
   Ppt: number
   Tdc: number | null
@@ -226,6 +232,12 @@ export interface BridgeApi {
     GetClockOffsetRange(gpuIndex?: number): HostBridgePromise<ClockOffsetRangeInfo>
     GetClockOffsets(gpuIndex?: number): HostBridgePromise<ClockOffsetsInfo>
     ApplyClockOffsets(coreMhz: number, memoryMhz: number, gpuIndex?: number): HostBridgePromise<void>
+    GetVoltageFrequencyCurve(): HostBridgePromise<CurveSnapshot>
+    PreviewVoltageFrequencyCurve(anchorId: number, targetMhz: number): HostBridgePromise<CurvePreview>
+    ApplyVoltageFrequencyCurve(token: string, acknowledge: boolean): HostBridgePromise<void>
+    GetCurveTrialStatus(): HostBridgePromise<CurveTrialStatus>
+    KeepVoltageFrequencyCurve(acknowledge: boolean): HostBridgePromise<void>
+    RestoreVoltageFrequencyCurve(acknowledge: boolean): HostBridgePromise<void>
     SetCoreClockOffset(mhz: number, gpuIndex?: number): HostBridgePromise<void>
     SetMemoryClockOffset(mhz: number, gpuIndex?: number): HostBridgePromise<void>
     ResetClockOffsets(gpuIndex?: number): HostBridgePromise<void>
@@ -251,6 +263,8 @@ export interface BridgeApi {
     GetTurboEnabled(): HostBridgePromise<{ ac: boolean; dc: boolean }>
   }
   SystemInfo: {
+    GetPawnIOStatus(): HostBridgePromise<PawnIOStatus>
+    InstallPawnIO(acknowledge: boolean): HostBridgePromise<void>
     GetSystemOverview(): HostBridgePromise<SystemOverview>
     OpenUrl(url: string): HostBridgePromise<void>
   }
@@ -422,6 +436,12 @@ export const KeyboardGradient = {
 }
 
 export const NvidiaGpu = {
+  GetVoltageFrequencyCurve: () => call(raw.NvidiaGpu.GetVoltageFrequencyCurve()),
+  PreviewVoltageFrequencyCurve: (anchorId: number, targetMhz: number) => call(raw.NvidiaGpu.PreviewVoltageFrequencyCurve(anchorId, targetMhz)),
+  ApplyVoltageFrequencyCurve: (token: string, acknowledge: boolean) => call(raw.NvidiaGpu.ApplyVoltageFrequencyCurve(token, acknowledge)),
+  GetCurveTrialStatus: () => call(raw.NvidiaGpu.GetCurveTrialStatus()),
+  KeepVoltageFrequencyCurve: (acknowledge: boolean) => call(raw.NvidiaGpu.KeepVoltageFrequencyCurve(acknowledge)),
+  RestoreVoltageFrequencyCurve: (acknowledge: boolean) => call(raw.NvidiaGpu.RestoreVoltageFrequencyCurve(acknowledge)),
   GetGpuName: (gpuIndex?: number) =>
     cached(STATIC_TTL_MS, `NvidiaGpu.GetGpuName(${gpuIndex ?? ''})`, () =>
       call(raw.NvidiaGpu.GetGpuName(gpuIndex)),
@@ -521,6 +541,8 @@ export const NvidiaGpu = {
 }
 
 export const SystemInfo = {
+  GetPawnIOStatus: () => call(raw.SystemInfo.GetPawnIOStatus()),
+  InstallPawnIO: (acknowledge: boolean) => call(raw.SystemInfo.InstallPawnIO(acknowledge)),
   GetSystemOverview: () =>
     cached(STATIC_TTL_MS, 'SystemInfo.GetSystemOverview', () =>
       call(raw.SystemInfo.GetSystemOverview()),

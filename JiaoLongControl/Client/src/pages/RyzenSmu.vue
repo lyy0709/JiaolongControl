@@ -172,12 +172,26 @@ const CONFIG_GROUPS: ConfigGroup[] = [
   },
 ]
 
+// These are input guards, not recommended settings or values read from hardware.
+for (const group of CONFIG_GROUPS) for (const item of group.items) {
+  if (item.unit === 'W') { item.min = 5; item.max = 150 }
+  if (item.unit === 's') item.min = 1
+  if (item.unit === 'mA') { item.min = 1000; item.max = 200000 }
+  if (item.unit === '℃') { item.min = 60; item.max = 100 }
+}
+const disabledKeys = new Set(['PboScalar', 'OcClk', 'OcVolt'])
+const anyLoading = computed(() => Object.values(loadingMap).some(Boolean))
+function inputValid(item: ConfigGroupItem) {
+  const value = smuData.value?.[item.key]
+  return value !== undefined && Number.isInteger(value) && value >= item.min && value <= item.max
+}
+
 const loadingMap = reactive<Record<string, boolean>>({})
 const configStore = useConfigStore()
 if (!configStore.config) {
   await configStore.fetchConfig()
 }
-const smuData = computed(() => configStore.config?.Smu)
+const smuData = ref(configStore.config ? { ...configStore.config.Smu } : undefined)
 
 // Physical core count fetched from backend (excludes hyperthreading)
 const coreCount = ref(0)
@@ -206,6 +220,12 @@ watch(
 )
 
 const applySetting = async (methodName: keyof typeof RyzenSmu, ...args: number[]) => {
+  if (anyLoading.value) return
+  const key = methodName.slice(3) as keyof SmuSectionType
+  if (['SetCurveOptimizerPerCore', 'SetPerCoreOcClk', 'EnableOc', 'DisableOc'].includes(methodName) || disabledKeys.has(key)) {
+    Message.error('此协议尚未验证，已禁用写入')
+    return
+  }
   loadingMap[methodName] = true
   try {
     const fn = RyzenSmu[methodName] as unknown as (
@@ -214,11 +234,15 @@ const applySetting = async (methodName: keyof typeof RyzenSmu, ...args: number[]
     const res = await fn(...args)
 
     if (res.Success) {
-      Message.success(res.Message || '应用成功')
+      if (configStore.config && key in configStore.config.Smu && args[0] !== undefined) {
+        configStore.config.Smu[key] = args[0]
+        const save = await configStore.saveConfig()
+        if (!save?.Success) { Message.error('驱动已接受，但配置保存失败'); return }
+      }
+      Message.success('驱动已接受并保存输入；不代表硬件稳定或实际读回')
     } else {
       Message.error(res.Message || '应用失败')
     }
-    configStore.debouncedSave()
   } catch (e) {
     Message.error('应用执行失败')
     console.error(e)
@@ -310,6 +334,7 @@ onUnmounted(() => {
           <p class="text-[13px] text-gray-500 mt-1">
             高级电源、电流及频率限制调整 (AMD Ryzen 平台专用)
           </p>
+          <p class="text-xs text-amber-600 mt-3 leading-6">此页为高级输入，通常无需再调整。0 表示尚未填写，不表示硬件为 0 或自动模式（CO 的 0 除外）。仅点击对应“应用”后写入。固定频率、直接电压、单核 CCD 映射未经验证，已禁用；使用 CO 不需要“启用超频”。</p>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -331,12 +356,13 @@ onUnmounted(() => {
                   <div class="flex justify-between items-center text-[11px]">
                     <span class="text-gray-400">{{ item.label }}</span>
                     <span class="text-ink font-mono font-medium"
-                      >{{ smuData[item.key] }} {{ item.unit }}</span
+                      >{{ smuData[item.key] === 0 ? '未填写' : `${smuData[item.key]} ${item.unit}` }}</span
                     >
                   </div>
                   <div class="flex items-center gap-4">
                     <a-slider
                       v-model="smuData[item.key]"
+                      :disabled="anyLoading || disabledKeys.has(item.key)"
                       :min="item.min"
                       :max="item.max"
                       :step="item.step || 1"
@@ -347,7 +373,8 @@ onUnmounted(() => {
                       type="primary"
                       size="small"
                       class="!bg-purple-600/10 !text-purple-400 !border-purple-500/20 hover:!bg-purple-600 hover:!text-white rounded-md px-3 font-semibold transition"
-                      :loading="loadingMap[item.key]"
+                      :loading="loadingMap['Set' + item.key]"
+                      :disabled="anyLoading || disabledKeys.has(item.key) || !inputValid(item)"
                       @click="
                         applySetting(('Set' + item.key) as keyof typeof RyzenSmu, smuData[item.key])
                       "
@@ -367,6 +394,7 @@ onUnmounted(() => {
                 type="primary"
                 class="flex-1 !rounded-lg font-bold !bg-emerald-600/20 !text-emerald-400 !border-emerald-500/20 hover:!bg-emerald-600 hover:!text-white"
                 :loading="loadingMap['EnableOc']"
+                disabled
                 @click="applySetting('EnableOc')"
                 >启用超频</a-button
               >
@@ -374,6 +402,7 @@ onUnmounted(() => {
                 type="primary"
                 class="flex-1 !rounded-lg font-bold !bg-rose-600/20 !text-rose-400 !border-rose-500/20 hover:!bg-rose-600 hover:!text-white"
                 :loading="loadingMap['DisableOc']"
+                disabled
                 @click="applySetting('DisableOc')"
                 >禁用超频</a-button
               >
@@ -398,6 +427,7 @@ onUnmounted(() => {
                   <span class="text-[9px] font-bold text-gray-500 uppercase">Cores</span>
                   <a-input-number
                     v-model="coreCount"
+                    disabled
                     :min="1"
                     :max="64"
                     size="mini"
@@ -418,8 +448,9 @@ onUnmounted(() => {
                 <div class="flex items-center gap-4">
                   <a-slider
                     v-model="smuData.CurveOptimizerAll"
-                    :min="-100"
-                    :max="100"
+                    :min="-30"
+                    :max="0"
+                    :disabled="anyLoading"
                     class="flex-1 slider-orange"
                   />
                   <a-button
@@ -427,6 +458,7 @@ onUnmounted(() => {
                     size="small"
                     class="!bg-orange-600/10 !text-orange-400 !border-orange-500/25 hover:!bg-orange-600 hover:!text-white rounded-md px-3 font-semibold transition"
                     :loading="loadingMap['SetCurveOptimizerAll']"
+                    :disabled="anyLoading || smuData.CurveOptimizerAll < -30 || smuData.CurveOptimizerAll > 0"
                     @click="applySetting('SetCurveOptimizerAll', smuData.CurveOptimizerAll)"
                     >应用</a-button
                   >
@@ -444,6 +476,7 @@ onUnmounted(() => {
                   <div class="flex items-center gap-1.5">
                     <a-input-number
                       v-model="perCoreCurve[index]"
+                      disabled
                       :min="-50"
                       :max="50"
                       size="mini"
@@ -452,6 +485,7 @@ onUnmounted(() => {
                     />
                     <button
                       class="w-5 h-5 bg-orange-600/10 text-orange-400 hover:bg-orange-600 hover:text-white transition-colors border border-orange-500/20 rounded flex items-center justify-center text-[10px]"
+                      disabled
                       @click="
                         applySetting('SetCurveOptimizerPerCore', index, perCoreCurve[index] ?? 0)
                       "
@@ -485,6 +519,7 @@ onUnmounted(() => {
                   <div class="flex items-center gap-1.5">
                     <a-input-number
                       v-model="perCoreOcClk[index]"
+                      disabled
                       :min="0"
                       :max="1000"
                       :step="25"
@@ -494,6 +529,7 @@ onUnmounted(() => {
                     />
                     <button
                       class="w-5 h-5 bg-blue-600/10 text-blue-400 hover:bg-blue-600 hover:text-white transition-colors border border-blue-500/20 rounded flex items-center justify-center text-[10px]"
+                      disabled
                       @click="applySetting('SetPerCoreOcClk', index, perCoreOcClk[index] ?? 0)"
                     >
                       ✓
@@ -526,15 +562,14 @@ onUnmounted(() => {
                 <span v-if="cpuName">{{ cpuName }}</span>
                 <span v-else class="text-gray-600 animate-pulse">检测中...</span>
               </div>
-              <div>AMD Ryzen 架构 / AM5 接口</div>
+              <div>AMD Ryzen；接口与协议由型号决定</div>
               <div>
                 <span v-if="cpuCoreInfo">{{ cpuCoreInfo }}</span>
                 <span v-else class="text-gray-600 animate-pulse">{{
                   coreCount > 0 ? `${coreCount} 物理核心` : '检测中...'
                 }}</span>
               </div>
-              <div>Curve Optimizer 已加载 {{ coreCount }} 核</div>
-              <div>支持 PBO2 曲线优化</div>
+              <div>检测到 {{ coreCount }} 个物理核心；不是驱动连接状态</div>
             </div>
           </div>
         </div>
@@ -592,7 +627,7 @@ onUnmounted(() => {
               <div>
                 <span class="text-[10px] text-gray-500 block">TDC 供电电流</span>
                 <span class="text-base font-bold text-ink font-mono"
-                  >{{ (telemetry.Tdc ?? 0).toFixed(1) }}
+                  >{{ telemetry.Tdc?.toFixed(1) ?? '未提供' }}
                   <span class="text-[10px] text-gray-500 font-bold">A</span></span
                 >
               </div>
@@ -625,7 +660,7 @@ onUnmounted(() => {
               <div>
                 <span class="text-[10px] text-gray-500 block">EDC 峰值电流</span>
                 <span class="text-base font-bold text-ink font-mono"
-                  >{{ (telemetry.Edc ?? 0).toFixed(1) }}
+                  >{{ telemetry.Edc?.toFixed(1) ?? '未提供' }}
                   <span class="text-[10px] text-gray-500 font-bold">A</span></span
                 >
               </div>

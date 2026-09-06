@@ -83,7 +83,7 @@ public class CpuProfileData
     public byte CpuShortPower { get; set; } = 55;
 
     [ConfigComment("CPU温度墙 (℃)")]
-    [ConfigRange(60, 105)]
+    [ConfigRange(60, 100)]
     public byte CpuTempWall { get; set; } = 95;
 
     [ConfigComment("CPU最大频率 (MHz)")]
@@ -96,6 +96,8 @@ public class CpuProfileData
 
 public class GpuSection
 {
+    [ConfigComment("仅在明确应用锁频后启用；旧配置默认不自动锁频")]
+    public bool ClockLockEnabled { get; set; }
     [ConfigComment("GPU核心频率 (MHz)")]
     public int GpuClock { get; set; }
 
@@ -169,22 +171,22 @@ public class SmuSection
     [ConfigComment("PPT限制 (RSMU, W)")]
     public int PptLimitRsmu { get; set; }
 
-    [ConfigComment("VRM电流 MP1 (A)")]
+    [ConfigComment("VRM电流 MP1 (mA)")]
     public int VrmCurrentMp1 { get; set; }
 
-    [ConfigComment("VRM电流 RSMU (A)")]
+    [ConfigComment("VRM电流 RSMU (mA)")]
     public int VrmCurrentRsmu { get; set; }
 
-    [ConfigComment("TDC限制 MP1 (A)")]
+    [ConfigComment("TDC限制 MP1 (mA)")]
     public int TdcLimitMp1 { get; set; }
 
-    [ConfigComment("TDC限制 RSMU (A)")]
+    [ConfigComment("TDC限制 RSMU (mA)")]
     public int TdcLimitRsmu { get; set; }
 
-    [ConfigComment("EDC限制 MP1 (A)")]
+    [ConfigComment("EDC限制 MP1 (mA)")]
     public int EdcLimitMp1 { get; set; }
 
-    [ConfigComment("EDC限制 RSMU (A)")]
+    [ConfigComment("EDC限制 RSMU (mA)")]
     public int EdcLimitRsmu { get; set; }
 
     [ConfigComment("温度限制 MP1 (℃)")]
