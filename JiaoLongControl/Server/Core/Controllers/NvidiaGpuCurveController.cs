@@ -48,12 +48,14 @@ public partial class NvidiaGpuController
         string device = CurveDevice();
         var handle = NvApiOverclock.GetGpuHandle(0);
         var status = NvApiOverclock.ReadClockVfStatus(handle);
-        var offsets = new CurveDriver(handle).ReadOffsets();
+        var table = NvApiOverclock.ReadTable(handle);
+        var offsets = table.Entries.Select(p => p.FrequencyOffsetKHz).ToArray();
         var range = NvApiOverclock.GetClockOffsetRange(handle);
-        var points = status.Entries.Select((p, id) => (p, id))
-            .Where(x => (status.Mask[x.id >> 5] & (1u << (x.id & 31))) != 0 && x.p.FrequencyKHz > 0 && x.p.VoltageMicroV > 0)
-            .Select(x => new CurvePoint(x.id, checked((int)x.p.VoltageMicroV), checked((int)x.p.FrequencyKHz), offsets[x.id]))
-            .OrderBy(p => p.VoltageMicroV).ToArray();
+        var ids = NvApiOverclock.GetGraphicsCurvePoints(status);
+        if (!status.Mask.SequenceEqual(table.Mask) || ids.Any(id => table.Entries[id].ClockType != 0))
+            throw new InvalidOperationException("状态表与控制表掩码/时钟域不一致");
+        var points = ids.Select(id => new CurvePoint(id, checked((int)status.Entries[id].VoltageMicroV),
+            checked((int)status.Entries[id].FrequencyKHz), offsets[id])).ToArray();
         var snapshot = new CurveSnapshot(device, points, offsets, checked(range.CoreMinMhz * 1000), checked(range.CoreMaxMhz * 1000));
         GpuCurvePlanner.Validate(snapshot);
         return snapshot;
@@ -104,7 +106,7 @@ public partial class NvidiaGpuController
                 // Exclusive creation: an existing recovery record must never be overwritten.
                 using (var file = new FileStream(CurveBackupPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
-                    JsonSerializer.Serialize(file, new CurveBackup(1, plan.Original, plan.Original.Fingerprint()));
+                    JsonSerializer.Serialize(file, new CurveBackup(2, plan.Original, plan.Original.Fingerprint()));
                     file.Flush(true);
                 }
                 _curveOriginal = plan.Original;

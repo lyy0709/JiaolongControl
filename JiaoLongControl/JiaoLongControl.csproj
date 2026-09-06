@@ -11,10 +11,10 @@
         <Configurations>Debug;Release</Configurations>
         <Platforms>x64</Platforms>
         <SatelliteResourceLanguages>zh-CN</SatelliteResourceLanguages>
-        <AppVersion>10.13.25-safe.1</AppVersion>
-        <Version>10.13.25-safe.1</Version>
-        <AssemblyVersion>10.13.25.1</AssemblyVersion>
-        <FileVersion>10.13.25.1</FileVersion>
+        <AppVersion>10.13.25-safe.2</AppVersion>
+        <Version>10.13.25-safe.2</Version>
+        <AssemblyVersion>10.13.25.2</AssemblyVersion>
+        <FileVersion>10.13.25.2</FileVersion>
     </PropertyGroup>
 
     <ItemGroup>

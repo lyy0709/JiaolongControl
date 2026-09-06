@@ -114,7 +114,7 @@ onUnmounted(() => clearInterval(timer)) // The rollback timer lives in the backe
   <section class="curve-panel bg-panel/60 border border-ink/10 rounded-xl p-5 shadow-lg space-y-4">
     <div class="flex justify-between items-center flex-wrap gap-2">
       <h2 class="font-semibold">GPU 电压 / 频率曲线</h2>
-      <span class="text-xs text-amber-600">实验性 · 未完成 4060 Laptop 实机兼容验证</span>
+      <span class="text-xs text-amber-600">实验性 · 已验证单点读写/恢复，未验证降压稳定性</span>
     </div>
     <p class="text-xs leading-6 text-gray-500">
       参考小飞机的曲线平台操作：保留低电压侧，锚点及右侧设为目标频率。

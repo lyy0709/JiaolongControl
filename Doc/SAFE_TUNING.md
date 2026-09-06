@@ -25,7 +25,11 @@
 
 ### 兼容性界限
 
-私有 NVAPI 结构沿用上游实现，并增加数据、身份、范围检查和事务保护。一手协议探索主要针对 RTX 5090，**不构成 RTX 4060 Laptop 兼容证明**。仅开放单 NVIDIA GPU 实验路径；驱动拒绝、静默忽略或取整导致读回不匹配均为失败。未进行真实 GPU 写入、收益、游戏稳定性、驱动挂起或蓝屏恢复测试。
+safe.2 修正曲线 v1 的 256-bit 请求掩码、核心/显存域边界及 255 槽控制表布局。状态条目位于 0x40、步长 28；控制条目位于 0x40、步长 36，频率偏移在 +24。请求掩码从驱动读取，写入采用完整读改写，不再使用猜测的零填充表。参考 `simple-nvidia-undervolt` 并在 RTX 4060 Laptop / 616.64 上独立验证：900 mV 的单个核心点从 2250 降到 2235 MHz，再恢复原始控制表、偏移及显存/电压设置。详见 [测试记录](CURVE_COMPATIBILITY_4060.md)。
+
+这仅验证单点协议与恢复，**不等于整条曲线、降压收益或游戏稳定性通过**；没有测试驱动挂起或蓝屏恢复。仅开放单 NVIDIA GPU 实验路径；驱动拒绝、静默忽略或取整导致读回不匹配均为失败。偏移单位仅在驱动报告 −1000～+1000 MHz 的已验证范围签名下允许写入。
+
+备份内容版本升级为 2（255 个偏移），保留原文件路径以发现历史备份。版本 1 或 128 槽的旧备份不能按新协议恢复，会被拒绝并保留，不猜测转换、不自动清除。
 
 ## PawnIO：内置安装器，仍需要驱动
 
@@ -60,6 +64,7 @@ UI 冒烟测试：在 Client 目录执行 `npm run dev -- --host 127.0.0.1 --por
 
 - [MSI 曲线编辑指南](https://www.msi.com/blog/msi-afterburner-overclocking-undervolting-guide)：参考操作思路，不复制软件或套用参数。
 - [LACT #936](https://github.com/ilya-zlobintsev/LACT/issues/936)：结构和单点掩码参考，不是本机兼容认证。
+- [simple-nvidia-undervolt 协议说明](https://github.com/vuplea/simple-nvidia-undervolt/blob/beace06d9b17d0e614d0925360f84456d1320d2a/DEVELOPMENT.md)：safe.2 的原始缓冲区、域边界和频率偏移位置交叉验证依据，保留独立实现。
 - [NVIDIA-smi 文档](https://docs.nvidia.com/deploy/nvidia-smi/index.html)：锁频及解除锁频。
 - [PawnIO 官网](https://pawnio.eu/)、[模块集成说明](https://github.com/namazso/PawnIO.Modules/wiki/Using-PawnIO-Modules)、[安装器发布页](https://github.com/namazso/PawnIO.Setup/releases/tag/2.2.0)。
 - [Microsoft 用户态与内核态说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/gettingstarted/user-mode-and-kernel-mode)。

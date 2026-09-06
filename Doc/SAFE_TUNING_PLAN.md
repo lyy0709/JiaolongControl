@@ -46,3 +46,14 @@ Tests must cover no writes on reads, invalid values, partial application, driver
 - Final committed-source rebuild: backend 18 / frontend 16 tests passed, typecheck and publish succeeded. All 301 ZIP entries verified; all three embedded PawnIO resources match the source files; official installer signature remains valid.
 - ZIP: 75,654,238 bytes, SHA-256 `b95d890ff0ed2319b8aed5ac89e32cf78ddb1e35360e09e09d8877f9a7c433c0`. An unauthenticated public download was fetched and independently hashed to the same value. Remote tag resolves to the source commit above.
 - Stopped the mock UI development server. No actual WPF application launch, hardware writes, driver installation, reboot, installed-application/config changes, or stress tests were performed. Remaining next step belongs to the user: new-directory deployment and read-only compatibility checks before any opted-in tuning.
+
+## Follow-up: user-authorized local 4060 compatibility tests and safe.2
+
+The statements above describe the safe.1 release validation, before the subsequent authorization for real GPU testing.
+
+- User reported a curve-layout rejection, requested GitHub research and local hardware testing, then confirmed applications were closed and approved the write test. Two bounded tests were performed through user-approved Windows administrator prompts.
+- Identified the actual v1 protocol: device-provided 256-bit mask, core prefix ending before memory-domain slot 127, 28-byte status and 36-byte control strides from 0x40. A matching total buffer size had hidden incorrect safe.1 field placement.
+- The independent MIT open-source interop and the corrected project backend each lowered only the 900 mV / slot 72 point by 15 MHz, 2250 to 2235 MHz, then restored. Full raw control, all offsets, P0 clock/voltage settings and voltage boost were verified against the original. Local logs/backups remain in ignored bin/ only.
+- Scope stays GPU compatibility: no CPU changes, driver installs, BIOS, startup persistence, stress tests or installed application replacements. Whole-curve application and long-term undervolt stability remain unverified.
+- Corrected the native structs/masks/domain boundary, full read-modify-write and backup schema. Added field-offset/domain-boundary/legacy-backup regression tests and opt-in read-only integration probes. Keep local packaging separate from publishing a new GitHub release unless requested.
+- Verification: 21 backend regressions passed; 16 frontend tests, Vue typecheck and production build passed. The actual public read/preview API ran on this GPU without WPF/Bridge initialization: both succeeded, with 127 core points, 255 offsets, and no offset change after preview. Package the committed safe.2 source for local testing; do not claim full-curve stability.

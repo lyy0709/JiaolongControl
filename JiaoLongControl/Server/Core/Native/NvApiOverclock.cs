@@ -6,7 +6,7 @@ namespace JiaoLongControl.Server.Core.Native
 {
     /// <summary>
     /// NVIDIA 超频私有 NVAPI 接口封装。
-    /// 结构体布局与 NvAPIWrapper (falahati, MIT) 反汇编布局一致，函数 ID 为 NVAPI 私有 ID。
+    /// 曲线 v1 布局基于原始缓冲区及独立开源实现交叉验证，不能仅凭总长度判断兼容。
     /// </summary>
     internal static class NvApiOverclock
     {
@@ -193,34 +193,43 @@ namespace JiaoLongControl.Server.Core.Native
         [StructLayout(LayoutKind.Sequential, Pack = 8)]
         public struct VfControlEntry
         {
+            public uint Reserved0;
+            public uint ClockType;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4)] public uint[] ReservedBeforeOffset;
             public int FrequencyOffsetKHz;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 17)] public uint[] Reserved;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 2)] public uint[] ReservedAfterOffset;
         }
 
         /// <summary>
         /// V/F 曲线偏移表 (0x23F1B133/0x0733E009), 9248 字节。
-        /// 布局与 LACT #936 在 RTX 5090 (driver 590) 实测协议一致:
-        /// 0x00 version | 0x04 mask(128bit, 每次调用仅允许一位置 1) | 0x20 起 128 个 72 字节条目 (频率偏移 kHz 在 +0x00)。
+        /// v1: 256-bit request mask, entries at 0x40 with 36-byte stride;
+        /// domain at +4, signed frequency delta at +24. Verified with a single
+        /// -15 MHz point and exact restoration on RTX 4060 Laptop / driver 616.64.
+        /// Protocol cross-check: vuplea/simple-nvidia-undervolt DEVELOPMENT.md.
         /// </summary>
         [StructLayout(LayoutKind.Sequential, Pack = 8)]
         public struct ClockBoostTable
         {
             public uint Version;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4)] public uint[] Mask;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 3)] public uint[] HeaderReserved;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)] public VfControlEntry[] Entries;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)] public uint[] Mask;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 7)] public uint[] HeaderReserved;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 255)] public VfControlEntry[] Entries;
+            public uint Trailing;
 
             public static ClockBoostTable Allocate()
             {
                 var table = new ClockBoostTable
                 {
                     Version = MakeVersion(Marshal.SizeOf(typeof(ClockBoostTable)), 1),
-                    Mask = new uint[4],
-                    HeaderReserved = new uint[3],
-                    Entries = new VfControlEntry[128]
+                    Mask = new uint[8],
+                    HeaderReserved = new uint[7],
+                    Entries = new VfControlEntry[255]
                 };
                 for (int i = 0; i < table.Entries.Length; i++)
-                    table.Entries[i].Reserved = new uint[17];
+                {
+                    table.Entries[i].ReservedBeforeOffset = new uint[4];
+                    table.Entries[i].ReservedAfterOffset = new uint[2];
+                }
                 return table;
             }
 
@@ -232,8 +241,12 @@ namespace JiaoLongControl.Server.Core.Native
                 for (int i = 0; i < Entries.Length; i++)
                 {
                     copy.Entries[i].FrequencyOffsetKHz = Entries[i].FrequencyOffsetKHz;
-                    Array.Copy(Entries[i].Reserved, copy.Entries[i].Reserved, 17);
+                    copy.Entries[i].Reserved0 = Entries[i].Reserved0;
+                    copy.Entries[i].ClockType = Entries[i].ClockType;
+                    Array.Copy(Entries[i].ReservedBeforeOffset, copy.Entries[i].ReservedBeforeOffset, 4);
+                    Array.Copy(Entries[i].ReservedAfterOffset, copy.Entries[i].ReservedAfterOffset, 2);
                 }
+                copy.Trailing = Trailing;
                 return copy;
             }
         }
@@ -254,8 +267,8 @@ namespace JiaoLongControl.Server.Core.Native
         public struct ClockBoostMasks
         {
             public uint Version;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4)] public uint[] Masks;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)] public uint[] Unknown1;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)] public uint[] Masks;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4)] public uint[] Unknown1;
             [MarshalAs(UnmanagedType.ByValArray, SizeConst = 103)] public ClockBoostMaskEntry[] Entries;
             [MarshalAs(UnmanagedType.ByValArray, SizeConst = 916)] public uint[] Unknown2;
 
@@ -264,8 +277,8 @@ namespace JiaoLongControl.Server.Core.Native
                 return new ClockBoostMasks
                 {
                     Version = MakeVersion(Marshal.SizeOf(typeof(ClockBoostMasks)), 1),
-                    Masks = new uint[4],
-                    Unknown1 = new uint[8],
+                    Masks = new uint[8],
+                    Unknown1 = new uint[4],
                     Entries = new ClockBoostMaskEntry[103],
                     Unknown2 = new uint[916]
                 };
@@ -275,37 +288,36 @@ namespace JiaoLongControl.Server.Core.Native
         [StructLayout(LayoutKind.Sequential, Pack = 8)]
         public struct VfStatusEntry
         {
+            public uint Reserved0;
+            public uint ClockType;
             public uint FrequencyKHz;
             public uint VoltageMicroV;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 5)] public uint[] Reserved;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 3)] public uint[] Reserved;
         }
 
-        /// <summary>V/F 曲线读取 (0x21537AD4), 7208 字节: 0x48 起 128 个 28 字节条目 (频率 kHz/电压 µV)。</summary>
+        /// <summary>V/F status v1: 7208 bytes, 255 x 28-byte records at 0x40.
+        /// Type +4, frequency +8, voltage +12. Stop the core prefix at the first
+        /// other domain; a memory record may have a plausible duplicate voltage.</summary>
         [StructLayout(LayoutKind.Sequential, Pack = 8)]
         public struct ClockVfStatus
         {
             public uint Version;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4)] public uint[] Mask;
-            public uint RequestField;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 12)] public uint[] Reserved;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)] public VfStatusEntry[] Entries;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 888)] public uint[] Trailing;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)] public uint[] Mask;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 7)] public uint[] Reserved;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 255)] public VfStatusEntry[] Entries;
+            public uint Trailing;
 
             public static ClockVfStatus Allocate()
             {
                 var status = new ClockVfStatus
                 {
                     Version = MakeVersion(Marshal.SizeOf(typeof(ClockVfStatus)), 1),
-                    Mask = new uint[4],
-                    RequestField = 15,
-                    Reserved = new uint[12],
-                    Entries = new VfStatusEntry[128],
-                    Trailing = new uint[888]
+                    Mask = new uint[8],
+                    Reserved = new uint[7],
+                    Entries = new VfStatusEntry[255]
                 };
-                for (int i = 0; i < 4; i++)
-                    status.Mask[i] = 0xFFFFFFFF;
                 for (int i = 0; i < status.Entries.Length; i++)
-                    status.Entries[i].Reserved = new uint[5];
+                    status.Entries[i].Reserved = new uint[3];
                 return status;
             }
         }
@@ -696,19 +708,28 @@ namespace JiaoLongControl.Server.Core.Native
         public static int[] GetActiveCurvePoints(IntPtr gpu)
         {
             var status = ReadClockVfStatus(gpu);
-            var points = Enumerable.Range(0, status.Entries.Length).Where(i =>
-                (status.Mask[i >> 5] & (1u << (i & 31))) != 0 &&
-                status.Entries[i].FrequencyKHz > 0 && status.Entries[i].VoltageMicroV > 0).ToArray();
+            var points = GetGraphicsCurvePoints(status);
             if (points.Length == 0) throw new NotSupportedException("驱动未返回有效曲线点");
             return points;
         }
 
+        public static int[] GetGraphicsCurvePoints(ClockVfStatus status) =>
+            Enumerable.Range(0, status.Entries.Length).TakeWhile(i =>
+                (status.Mask[i >> 5] & (1u << (i & 31))) != 0 && status.Entries[i].ClockType == 0).ToArray();
+
         public static void SetClockPointOffset(IntPtr gpu, int point, int offsetKHz)
         {
-            if (point < 0 || point >= 128)
+            if (point <= 0 || point >= 255 || Math.Abs((long)offsetKHz) > 1000000)
                 throw new ArgumentOutOfRangeException(nameof(point));
-            var table = ClockBoostTable.Allocate();
-            table.Mask[point >> 5] = 1u << (point & 31);
+            if (!GetActiveCurvePoints(gpu).Contains(point))
+                throw new NotSupportedException("不能写入非核心曲线点");
+            var range = GetClockOffsetRange(gpu);
+            if (range.CoreMinMhz != -1000 || range.CoreMaxMhz != 1000)
+                throw new NotSupportedException("当前偏移单位/范围未验证，不能按普通 kHz 写入");
+            // Full read-modify-write preserves the domain and all opaque fields.
+            // A zeroed guessed table is not a valid recovery or point write.
+            var table = ReadTable(gpu);
+            if (table.Entries[point].ClockType != 0) throw new NotSupportedException("控制表时钟域不匹配");
             table.Entries[point].FrequencyOffsetKHz = offsetKHz;
             WriteTable(gpu, ref table);
         }
@@ -716,6 +737,7 @@ namespace JiaoLongControl.Server.Core.Native
         public static ClockVfStatus ReadClockVfStatus(IntPtr gpu)
         {
             var status = ClockVfStatus.Allocate();
+            status.Mask = ReadCurveRequestMask(gpu);
             Check(GetDelegate<ClockVfStatusDelegate>(IdGetClockVfStatus)(gpu, ref status));
             return status;
         }
@@ -729,6 +751,7 @@ namespace JiaoLongControl.Server.Core.Native
         public static ClockBoostTable ReadTable(IntPtr gpu)
         {
             var table = ClockBoostTable.Allocate();
+            table.Mask = ReadCurveRequestMask(gpu);
             Check(GetDelegate<ClockBoostTableDelegate>(IdGetClockBoostTable)(gpu, ref table));
             return table;
         }
@@ -736,10 +759,16 @@ namespace JiaoLongControl.Server.Core.Native
         /// <summary>带表头域字段读取 (HeaderReserved[0]=0 核心, 探测值 4 疑似显存域)。</summary>
         public static ClockBoostTable ReadTable(IntPtr gpu, uint domain)
         {
-            var table = ClockBoostTable.Allocate();
-            table.HeaderReserved[0] = domain;
-            Check(GetDelegate<ClockBoostTableDelegate>(IdGetClockBoostTable)(gpu, ref table));
-            return table;
+            if (domain != 0) throw new NotSupportedException("禁止猜测控制表头中的时钟域字段");
+            return ReadTable(gpu);
+        }
+
+        private static uint[] ReadCurveRequestMask(IntPtr gpu)
+        {
+            var mask = ReadClockBoostMasks(gpu).Masks;
+            if (mask.Length != 8 || mask.All(x => x == 0) || (mask[7] & 0x80000000) != 0)
+                throw new NotSupportedException("驱动曲线点掩码为空或超出已知缓冲区");
+            return (uint[])mask.Clone();
         }
 
         /// <summary>直接写回整张 V/F 偏移表（可用于逐点曲线编辑或恢复原始表）。</summary>

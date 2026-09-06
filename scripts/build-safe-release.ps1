@@ -29,6 +29,8 @@ try {
     } finally { Pop-Location }
 
     Copy-Item -LiteralPath (Join-Path $releaseRepo 'Doc/RELEASE_FIRST_RUN.md') -Destination (Join-Path $packageDir 'READ-ME-FIRST.md')
+    Copy-Item -LiteralPath (Join-Path $releaseRepo 'Doc/RELEASE_FIRST_RUN.md') -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $releaseRepo 'Doc/CURVE_COMPATIBILITY_4060.md') -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $releaseRepo 'Doc/SAFE_TUNING.md') -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $releaseRepo 'LICENSE.md') -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $releaseRepo 'JiaoLongControl/Drivers/PawnIO/SETUP-NOTICE.md') -Destination (Join-Path $packageDir 'Drivers/PawnIO')

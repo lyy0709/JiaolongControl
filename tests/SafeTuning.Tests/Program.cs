@@ -19,7 +19,7 @@ Exception Reject(Action action)
 CurveSnapshot Snapshot()
 {
     var points = Enumerable.Range(0, 32).Select(i => new CurvePoint(i, 600000 + i * 12500, 1200000 + i * 45000, 30000)).ToArray();
-    var offsets = new int[128];
+    var offsets = new int[255];
     foreach (var p in points) offsets[p.Id] = p.OffsetKHz;
     return new("fake-device|fake-driver", points, offsets, -1000000, 1000000);
 }
@@ -82,7 +82,8 @@ Test("recovery JSON roundtrip preserves fingerprint", () => {
     Check(parsed.Fingerprint() == s.Fingerprint());
 });
 Test("backup schema or content corruption cannot silently change restoration offsets", () => {
-    var s = Snapshot(); var backup = new CurveBackup(1, s, s.Fingerprint()); backup.Validate();
+    var s = Snapshot(); var backup = new CurveBackup(2, s, s.Fingerprint()); backup.Validate();
+    Reject(() => (backup with { Version = 1 }).Validate());
     Reject(() => (backup with { Version = 999 }).Validate());
     s.Offsets[20]++;
     Reject(() => backup.Validate());
@@ -130,6 +131,40 @@ Test("native managed layouts match expected buffer sizes (not a hardware ABI val
     Check(Marshal.SizeOf(assembly.GetType("JiaoLongControl.Server.Core.Native.NvApiOverclock+ClockBoostTable")!) == 9248);
     Check(Marshal.SizeOf(assembly.GetType("JiaoLongControl.Server.Core.Native.NvApiOverclock+ClockVfStatus")!) == 7208);
 });
+Test("curve field offsets match the independently observed 4060 protocol", () => {
+    var assembly = typeof(GpuCurvePlanner).Assembly;
+    Type Native(string name) => assembly.GetType("JiaoLongControl.Server.Core.Native.NvApiOverclock+" + name)!;
+    Check(Marshal.SizeOf(Native("VfControlEntry")) == 36);
+    Check(Marshal.SizeOf(Native("VfStatusEntry")) == 28);
+    Check(Marshal.SizeOf(Native("ClockBoostMasks")) == 6188);
+    Check(Marshal.OffsetOf(Native("ClockBoostTable"), "Entries").ToInt32() == 64);
+    Check(Marshal.OffsetOf(Native("ClockVfStatus"), "Entries").ToInt32() == 64);
+    Check(Marshal.OffsetOf(Native("VfControlEntry"), "FrequencyOffsetKHz").ToInt32() == 24);
+    Check(Marshal.OffsetOf(Native("VfStatusEntry"), "ClockType").ToInt32() == 4);
+    Check(Marshal.OffsetOf(Native("VfStatusEntry"), "FrequencyKHz").ToInt32() == 8);
+    Check(Marshal.OffsetOf(Native("VfStatusEntry"), "VoltageMicroV").ToInt32() == 12);
+});
+Test("memory-domain duplicate voltage ends core prefix and later slots cannot re-enter", () => {
+    var native = typeof(GpuCurvePlanner).Assembly.GetType("JiaoLongControl.Server.Core.Native.NvApiOverclock")!;
+    var statusType = native.GetNestedType("ClockVfStatus")!;
+    var status = statusType.GetMethod("Allocate")!.Invoke(null, null)!;
+    var mask = (uint[])statusType.GetField("Mask")!.GetValue(status)!;
+    for (int i = 0; i < 4; i++) mask[i] = uint.MaxValue;
+    mask[4] = 15; // 132 slots, not 128 core points.
+    var entries = (Array)statusType.GetField("Entries")!.GetValue(status)!;
+    for (int i = 127; i < 131; i++)
+    {
+        var entry = entries.GetValue(i)!;
+        entry.GetType().GetField("ClockType")!.SetValue(entry, 1u);
+        entry.GetType().GetField("VoltageMicroV")!.SetValue(entry, 600000u);
+        entries.SetValue(entry, i);
+    }
+    var points = (int[])native.GetMethod("GetGraphicsCurvePoints")!.Invoke(null, [status])!;
+    Check(points.SequenceEqual(Enumerable.Range(0, 127)));
+});
+Test("old 128-entry snapshots cannot be mistaken for corrected recovery records", () => {
+    Reject(() => GpuCurvePlanner.Validate(Snapshot() with { Offsets = new int[128] }));
+});
 Console.WriteLine($"{passed} tests passed; no hardware writes or installer execution.");
 
 sealed class FakeDriver : ICurveOffsetDriver
@@ -145,7 +180,7 @@ sealed class FakeDriver : ICurveOffsetDriver
         if (Ignore) return;
         if (FailRestore && offset == original[point]) throw new Exception("restore rejected");
         Values[point] = offset;
-        if (CorruptOutside) Values[127] = 123;
+        if (CorruptOutside) Values[254] = 123;
         if (point == FailOnceAt) { FailOnceAt = -1; throw new Exception("write-then-throw"); }
     }
 }

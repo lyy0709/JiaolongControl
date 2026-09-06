@@ -14,8 +14,8 @@ public sealed record CurveBackup(int Version, CurveSnapshot Original, string Fin
 {
     public void Validate()
     {
-        if (Version != 1 || Original == null || Fingerprint != Original.Fingerprint())
-            throw new InvalidDataException("曲线备份完整性校验失败，拒绝恢复");
+        if (Version != 2 || Original == null || Fingerprint != Original.Fingerprint())
+            throw new InvalidDataException("曲线备份版本/完整性校验失败，旧版布局不能用于恢复");
         GpuCurvePlanner.Validate(Original);
     }
 }
@@ -25,8 +25,8 @@ public static class GpuCurvePlanner
 {
     public static void Validate(CurveSnapshot snapshot)
     {
-        if (string.IsNullOrWhiteSpace(snapshot.Device) || snapshot.Offsets.Length != 128 ||
-            snapshot.Points.Length < 16 || snapshot.Points.Length > 128 ||
+        if (string.IsNullOrWhiteSpace(snapshot.Device) || snapshot.Offsets.Length != 255 ||
+            snapshot.Points.Length < 16 || snapshot.Points.Length > 255 ||
             snapshot.MinOffsetKHz >= snapshot.MaxOffsetKHz ||
             snapshot.MinOffsetKHz > 0 || snapshot.MaxOffsetKHz < 0)
             throw new InvalidOperationException("驱动返回的曲线/偏移范围不完整，禁止写入");
@@ -34,11 +34,11 @@ public static class GpuCurvePlanner
         int previousVoltage = 0;
         foreach (var point in snapshot.Points)
         {
-            if (point.Id is < 0 or >= 128 || !ids.Add(point.Id) ||
+            if (point.Id is < 0 or >= 255 || !ids.Add(point.Id) ||
                 point.VoltageMicroV is < 400000 or > 1500000 || point.VoltageMicroV <= previousVoltage ||
                 point.FrequencyKHz is < 100000 or > 4000000 ||
                 point.OffsetKHz != snapshot.Offsets[point.Id] || Math.Abs((long)point.OffsetKHz) > 1000000)
-                throw new InvalidOperationException("曲线布局/数值异常，禁止猜测有效点");
+                throw new InvalidOperationException($"核心曲线点 #{point.Id} 布局/数值异常：{point.VoltageMicroV} µV / {point.FrequencyKHz} kHz；禁止写入");
             previousVoltage = point.VoltageMicroV;
         }
     }
@@ -107,6 +107,8 @@ public static class GpuCurveTransaction
         var errors = new List<string>();
         foreach (var point in original.Points)
         {
+            // Anchor zero is not editable. Verify it in the full readback instead.
+            if (point.Id == 0) continue;
             // Also attempt the point whose write threw: a failed call may have changed hardware.
             try { driver.WriteOffset(point.Id, original.Offsets[point.Id]); }
             catch (Exception ex) { errors.Add($"#{point.Id}: {ex.Message}"); }
